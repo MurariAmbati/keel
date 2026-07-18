@@ -668,6 +668,50 @@ time), so this buys thread-*safety* (coarse-locked sharing), not yet
 thread-*concurrency*; wiring the lock manager + MVCC for fine-grained latching is the
 next phase, now unblocked because the types cross thread boundaries.
 
+## D-PAGER-8 — Localising the D-PAGER-7 hang: one re-entrant borrow, found and removed
+D-PAGER-7 recorded *why* the `RefCell`→`Mutex` conversion hung (`RefCell` permits nested
+shared borrows, `Mutex` permits none) but never recorded **where**. The hang was observed,
+not located, which is why the remaining work was scoped as an open-ended "restructure the
+call sites" rather than a finite list. This entry closes that gap.
+
+**Method.** `db::borrowtrack` adds `TrackedRefCell`, a drop-in for `RefCell` that keeps a
+per-thread depth count per cell instance and reports any borrow taken while that same cell
+is already borrowed on the same thread — precisely the condition that deadlocks under
+`Mutex`. It sits behind the `borrowtrack` feature; with the feature off `DbCell<T>` is a
+plain `RefCell` and the build is unchanged. `Database`'s four cells (`catalog`, `indexes`,
+`stats`, `txn`) are labelled so findings name the field.
+
+**The detector was falsified before its output was trusted** (`db/tests/borrowtrack_selftest.rs`),
+in both directions: it reports a deliberately nested shared borrow, and stays silent on two
+sequential borrows. Without that, "the suite reported nothing" would have been
+indistinguishable from "the detector does nothing" — the same unfalsifiable-experiment trap
+that produced three invalid results earlier in this project.
+
+**The finding.** Exactly one re-entrant site in the db suite:
+
+```text
+re-entrant borrow: stats [shared, depth 1]
+    keel_db::Database::index_rows
+    keel_db::Database::select
+    keel_db::Database::q_error
+```
+
+`q_error` took `self.stats.borrow()` and held the guard across `self.select(&q)`, which
+reaches `index_rows`, which borrows `stats` again. Legal today; a self-deadlock the moment
+that cell becomes a `Mutex`, and also under `RwLock` if a writer queues between the two
+reads. Fixed by scoping the borrow to the estimate that needs it and dropping it before the
+`select` call — the estimate is a `f64`, so nothing needs the guard afterwards.
+
+**Honest boundary.** This removes *one* blocker; it does not make the conversion safe.
+The detector only sees paths the tests actually execute, so silence elsewhere is evidence,
+not proof. More importantly it instruments **only `Database`** — D-PAGER-6 also names
+`HeapFile`'s `fsm`/`cursor`/`stats` and `BTree`'s `root`, which are untracked and would
+have to be covered the same way before a conversion is attempted again. The claim here is
+narrow and deliberately so: the one re-entrancy that db's own coverage can reach is gone,
+and there is now a reusable instrument for finding the rest.
+
+Workspace **212**, both profiles, clippy-clean with the feature on and off.
+
 ## D-PAGER-7 — Making `Database` `Sync`: attempted, reverted, and why the reasoning was wrong
 D-PAGER-6 identified the last blocker to concurrent SQL: `Database`'s `RefCell`/`Cell`
 fields. Converting them (`RefCell`→`Mutex`, `Cell`→atomics, plus `StmtLog::end`) was

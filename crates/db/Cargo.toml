@@ -8,6 +8,9 @@ license.workspace = true
 name = "keel_db"
 path = "src/lib.rs"
 
+[features]
+borrowtrack = []
+
 [dependencies]
 keel-sql = { path = "../sql" }
 keel-types = { path = "../types" }

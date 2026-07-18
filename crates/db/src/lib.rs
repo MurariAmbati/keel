@@ -22,7 +22,10 @@
 //! under no-steal, and recovery replays the log — the SQL-level rung-1 property.
 //! See D-DB-1, D-EXEC-1, D-DB-2, D-WALDB-1.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
+
+pub mod borrowtrack;
+use borrowtrack::{new_cell, DbCell};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -132,8 +135,8 @@ type R<T> = Result<T, DbError>;
 /// A durable, SQL-speaking database over one data file.
 pub struct Database<P: RecoveryPager = BufferPool> {
     bp: P,
-    catalog: RefCell<BTreeMap<String, (u16, Schema)>>,
-    indexes: RefCell<Vec<IndexMeta>>,
+    catalog: DbCell<BTreeMap<String, (u16, Schema)>>,
+    indexes: DbCell<Vec<IndexMeta>>,
     next_tid: Cell<u16>,
     index_lookups: Cell<u64>,
     /// Number of queries served by the streaming hash-join executor (telemetry;
@@ -143,7 +146,7 @@ pub struct Database<P: RecoveryPager = BufferPool> {
     agg_streams: Cell<u64>,
     /// Per-table statistics from `ANALYZE`, used for cost-based access-path
     /// selection. Empty until `analyze` runs.
-    stats: RefCell<HashMap<u16, keel_stats::TableStats>>,
+    stats: DbCell<HashMap<u16, keel_stats::TableStats>>,
     /// When present, the database is in **logged** mode: every mutating statement
     /// is appended to this redo log (and fsynced) before it is applied, and the
     /// data file is held at its last checkpoint under no-steal. `None` = the
@@ -151,7 +154,7 @@ pub struct Database<P: RecoveryPager = BufferPool> {
     log: Option<StmtLog>,
     /// The buffered mutations of an open transaction (logged mode). `None` = no
     /// transaction open (auto-commit).
-    txn: RefCell<Option<Vec<String>>>,
+    txn: DbCell<Option<Vec<String>>>,
     /// Number of log records applied by the last `open_logged` recovery (telemetry:
     /// after a `compact`, this is the snapshot + tail, not the full history).
     replayed: Cell<u64>,
@@ -218,15 +221,15 @@ impl Database<BufferPool> {
         let bp = BufferPool::open_default(file, frames)?;
         let db = Database {
             bp,
-            catalog: RefCell::new(BTreeMap::new()),
-            indexes: RefCell::new(Vec::new()),
+            catalog: new_cell(BTreeMap::new(), "catalog"),
+            indexes: new_cell(Vec::new(), "indexes"),
             next_tid: Cell::new(FIRST_USER_TID),
             index_lookups: Cell::new(0),
             join_streams: Cell::new(0),
             agg_streams: Cell::new(0),
-            stats: RefCell::new(HashMap::new()),
+            stats: new_cell(HashMap::new(), "stats"),
             log: None,
-            txn: RefCell::new(None),
+            txn: new_cell(None, "txn"),
             replayed: Cell::new(0),
         };
         db.load_catalog()?;
@@ -252,15 +255,15 @@ impl Database<BufferPool> {
         bp.set_no_steal();
         let db = Database {
             bp,
-            catalog: RefCell::new(BTreeMap::new()),
-            indexes: RefCell::new(Vec::new()),
+            catalog: new_cell(BTreeMap::new(), "catalog"),
+            indexes: new_cell(Vec::new(), "indexes"),
             next_tid: Cell::new(FIRST_USER_TID),
             index_lookups: Cell::new(0),
             join_streams: Cell::new(0),
             agg_streams: Cell::new(0),
-            stats: RefCell::new(HashMap::new()),
+            stats: new_cell(HashMap::new(), "stats"),
             log: Some(StmtLog::open(log)),
-            txn: RefCell::new(None),
+            txn: new_cell(None, "txn"),
             replayed: Cell::new(0),
         };
         db.load_catalog()?;
@@ -277,15 +280,15 @@ impl<P: RecoveryPager> Database<P> {
     pub fn with_pager(bp: P) -> R<Self> {
         let db = Database {
             bp,
-            catalog: RefCell::new(BTreeMap::new()),
-            indexes: RefCell::new(Vec::new()),
+            catalog: new_cell(BTreeMap::new(), "catalog"),
+            indexes: new_cell(Vec::new(), "indexes"),
             next_tid: Cell::new(FIRST_USER_TID),
             index_lookups: Cell::new(0),
             join_streams: Cell::new(0),
             agg_streams: Cell::new(0),
-            stats: RefCell::new(HashMap::new()),
+            stats: new_cell(HashMap::new(), "stats"),
             log: None,
-            txn: RefCell::new(None),
+            txn: new_cell(None, "txn"),
             replayed: Cell::new(0),
         };
         db.load_catalog()?;
@@ -505,15 +508,17 @@ impl<P: RecoveryPager> Database<P> {
         let Some((tid, schema)) = self.catalog.borrow().get(&from.first.table).cloned() else {
             return Ok(None);
         };
-        let stats = self.stats.borrow();
-        let Some(ts) = stats.get(&tid) else {
-            return Ok(None);
+        let est = {
+            let stats = self.stats.borrow();
+            let Some(ts) = stats.get(&tid) else {
+                return Ok(None);
+            };
+            let est_sel = match &q.filter {
+                Some(f) => keel_stats::estimate_selectivity(f, &schema, ts),
+                None => 1.0,
+            };
+            est_sel * ts.row_count as f64
         };
-        let est_sel = match &q.filter {
-            Some(f) => keel_stats::estimate_selectivity(f, &schema, ts),
-            None => 1.0,
-        };
-        let est = est_sel * ts.row_count as f64;
         let actual = self.select(&q)?.rows.len() as f64;
         Ok(Some((est, actual, keel_stats::q_error(est, actual))))
     }
