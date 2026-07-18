@@ -63,7 +63,7 @@ pub fn random_value(g: &mut Gen, ty: ColumnType, allow_null: bool) -> Value {
         ColumnType::BigInt => Value::BigInt(g.below(7) as i64 - 3),
         ColumnType::Double => Value::Double(g.below(7) as f64 - 3.0),
         ColumnType::Varchar(_) => {
-            let alpha = [b'a', b'b', b'c'];
+            let alpha = *b"abc";
             let len = g.below(3);
             let s: String = (0..len).map(|_| *g.pick(&alpha) as char).collect();
             Value::Text(s)
