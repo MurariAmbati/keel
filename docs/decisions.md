@@ -668,6 +668,50 @@ time), so this buys thread-*safety* (coarse-locked sharing), not yet
 thread-*concurrency*; wiring the lock manager + MVCC for fine-grained latching is the
 next phase, now unblocked because the types cross thread boundaries.
 
+## D-PAGER-9 — The rest of the conversion surface, and why "`Cell`→atomics" is wrong for `BTree::root`
+D-PAGER-8 left an explicit gap: the detector instruments only `Database`, while D-PAGER-6
+also names `HeapFile`'s `fsm`/`cursor`/`stats` and `BTree`'s `root`. Enumerating that
+remainder turned out to close the deadlock question entirely — and to surface a **different**
+hazard that the recorded plan treats as already solved.
+
+**The deadlock surface is now closed.**
+
+| Field | Type | Re-entrancy (deadlock under `Mutex`) |
+|---|---|---|
+| `Database` ×4 | `RefCell` | 1 site found by instrument, fixed (D-PAGER-8); 0 remain |
+| `HeapFile::fsm` | `RefCell` | 2 sites, both leaf — verified by inspection |
+| `HeapFile::cursor`, `HeapFile::stats`, `BTree::root` | `Cell` | structurally impossible — `Cell` hands out no guard |
+
+`fsm`'s two sites are `set_fsm` (pushes/indexes the `Vec` and returns) and `pick_page`
+(reads `fsm`, touches `cursor`, returns). Neither calls back into `self`, so neither can
+re-enter. This is inspection rather than instrumentation, which is weaker evidence — it is
+sound here only because it is two leaf functions, not thirty-one call sites.
+
+**The hazard that replaces it.** `Cell` cannot deadlock, and that is exactly why it is
+dangerous: it converts silently and keeps its race. Three fields do a **non-atomic
+read-modify-write**:
+
+- `HeapFile::bump` — `stats.get()` → mutate → `stats.set()`; concurrent bumps lose one.
+- `HeapFile::pick_page` — `cursor.get()` … `cursor.set()`, interleaved with the `fsm` read;
+  two threads can pick the same page.
+- `BTree::insert` — `root.get()` at the top, then after a full recursive descent, a page
+  allocation and an internal-node write, `root.set(new_root)`. The read-modify-write spans
+  the **entire split**.
+
+The last one is the reason this entry exists. Making `root` an `AtomicU32` satisfies `Sync`,
+compiles, and removes a deadlock that never existed — while leaving the widest lost-update
+window in the codebase. Two concurrent root splits: one `set` wins, the loser's `right_pid`
+subtree is never linked from any parent, so it is a leaked subtree and silently lost rows.
+That failure is invisible to the type system and would not reproduce single-threaded.
+
+So D-PAGER-6's "convert `Cell`/`RefCell` to `Mutex`/atomics" is not merely under-specified;
+for `BTree::root` it is **the wrong primitive**. A root split is a multi-page structural
+modification and needs mutual exclusion over the operation, not an atomic over the pointer.
+
+**Status.** Deadlock: enumerated and closed. Atomicity: enumerated, three sites, none fixed
+— fixing them is a design question (lock granularity), not a type swap, and is deliberately
+left open rather than guessed at. Workspace **212**, both profiles, clippy-clean.
+
 ## D-PAGER-8 — Localising the D-PAGER-7 hang: one re-entrant borrow, found and removed
 D-PAGER-7 recorded *why* the `RefCell`→`Mutex` conversion hung (`RefCell` permits nested
 shared borrows, `Mutex` permits none) but never recorded **where**. The hang was observed,
