@@ -212,6 +212,7 @@ fn split_at_bytes(sizes: impl Iterator<Item = usize>, n: usize) -> usize {
 pub struct BTree<'a, P: Pager = BufferPool> {
     bp: &'a P,
     root: std::sync::atomic::AtomicU32,
+    guard: std::sync::RwLock<()>,
     meta: Option<PageId>,
 }
 
@@ -228,6 +229,7 @@ impl<'a, P: Pager> BTree<'a, P> {
         let tree = BTree {
             bp,
             root: std::sync::atomic::AtomicU32::new(root),
+            guard: std::sync::RwLock::new(()),
             meta: Some(meta),
         };
         tree.store_leaf(
@@ -248,6 +250,7 @@ impl<'a, P: Pager> BTree<'a, P> {
         Ok(BTree {
             bp,
             root: std::sync::atomic::AtomicU32::new(root),
+            guard: std::sync::RwLock::new(()),
             meta: Some(0),
         })
     }
@@ -259,6 +262,7 @@ impl<'a, P: Pager> BTree<'a, P> {
         let tree = BTree {
             bp,
             root: std::sync::atomic::AtomicU32::new(root),
+            guard: std::sync::RwLock::new(()),
             meta: None,
         };
         tree.store_leaf(
@@ -277,6 +281,7 @@ impl<'a, P: Pager> BTree<'a, P> {
         BTree {
             bp,
             root: std::sync::atomic::AtomicU32::new(root),
+            guard: std::sync::RwLock::new(()),
             meta: None,
         }
     }
@@ -338,6 +343,7 @@ impl<'a, P: Pager> BTree<'a, P> {
 
     /// Look up a key.
     pub fn get(&self, key: &[u8]) -> Result<Option<Rid>> {
+        let _r = self.guard.read().expect("btree guard poisoned");
         let mut pid = self.root.load(std::sync::atomic::Ordering::SeqCst);
         loop {
             match self.load(pid)? {
@@ -356,7 +362,12 @@ impl<'a, P: Pager> BTree<'a, P> {
     /// Insert or replace `key -> rid`. Splits propagate up; the root grows when
     /// it splits.
     pub fn insert(&self, key: &[u8], rid: Rid) -> Result<()> {
-        if let Some((sep, right_pid)) = self.insert_rec(self.root.load(std::sync::atomic::Ordering::SeqCst), key, rid)? {
+        let _w = self.guard.write().expect("btree guard poisoned");
+        if let Some((sep, right_pid)) = self.insert_rec(
+            self.root.load(std::sync::atomic::Ordering::SeqCst),
+            key,
+            rid,
+        )? {
             let old_root = self.root.load(std::sync::atomic::Ordering::SeqCst);
             let new_root = alloc(self.bp, PageType::BTreeInternal)?;
             self.store_internal(
@@ -366,7 +377,8 @@ impl<'a, P: Pager> BTree<'a, P> {
                     children: vec![old_root, right_pid],
                 },
             )?;
-            self.root.store(new_root, std::sync::atomic::Ordering::SeqCst);
+            self.root
+                .store(new_root, std::sync::atomic::Ordering::SeqCst);
             self.write_meta_root(new_root)?;
         }
         Ok(())
@@ -453,6 +465,7 @@ impl<'a, P: Pager> BTree<'a, P> {
 
     /// Delete a key (lazy: tolerate underflow). Returns whether it existed.
     pub fn delete(&self, key: &[u8]) -> Result<bool> {
+        let _w = self.guard.write().expect("btree guard poisoned");
         let mut pid = self.root.load(std::sync::atomic::Ordering::SeqCst);
         loop {
             match self.load(pid)? {
@@ -496,6 +509,7 @@ impl<'a, P: Pager> BTree<'a, P> {
 
     /// Range scan `[lo, hi)` (`hi = None` is unbounded), in key order.
     pub fn range(&self, lo: &[u8], hi: Option<&[u8]>) -> Result<Vec<(Vec<u8>, Rid)>> {
+        let _r = self.guard.read().expect("btree guard poisoned");
         let mut out = Vec::new();
         let mut cur = self.find_leaf(lo)?;
         while cur != NIL {
@@ -518,6 +532,7 @@ impl<'a, P: Pager> BTree<'a, P> {
 
     /// Every entry in key order (via the leftmost leaf + sibling chain).
     pub fn scan_all(&self) -> Result<Vec<(Vec<u8>, Rid)>> {
+        let _r = self.guard.read().expect("btree guard poisoned");
         let mut out = Vec::new();
         let mut cur = self.leftmost_leaf()?;
         while cur != NIL {
@@ -531,6 +546,7 @@ impl<'a, P: Pager> BTree<'a, P> {
     /// Validate every structural invariant the tree claims. The referee for the
     /// B-tree, callable from tests and (later) `dbcheck`.
     pub fn check(&self) -> Result<CheckReport> {
+        let _r = self.guard.read().expect("btree guard poisoned");
         let mut report = CheckReport::default();
         let mut leaf_depths = Vec::new();
         let mut dfs_leaves = Vec::new();

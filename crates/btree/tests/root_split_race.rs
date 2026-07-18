@@ -18,8 +18,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 
 use keel_btree::BTree;
-use keel_heap::Rid;
 use keel_cbuffer::{NoWal, PageCache, PageFormat};
+use keel_heap::Rid;
 use keel_vfs::{BlockFile, MemDisk};
 
 const THREADS: usize = 4;
@@ -78,5 +78,12 @@ fn concurrent_inserts_keep_every_row_reachable() {
          rate this high cannot be explained by root splits alone.",
         missing.len(),
         &missing[..missing.len().min(8)]
+    );
+
+    let report = tree.check().expect("check must not error");
+    assert!(
+        report.ok(),
+        "every key is reachable but the tree is structurally invalid after concurrent \
+         inserts — reachability alone is too weak an oracle here"
     );
 }
