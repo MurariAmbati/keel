@@ -38,17 +38,50 @@ fn the_database_is_send_so_it_can_move_between_threads() {
     assert_send::<Database<PageCache>>();
 }
 
-/// `Database` is deliberately NOT asserted `Sync` here, on either pool.
+/// The `!Sync` half of the ladder, as a compile-time fact rather than a comment.
 ///
-/// It cannot be: `RefCell`/`Cell` fields make it `!Sync` no matter what pool it
-/// holds. Adding `assert_sync::<Database<PageCache>>()` would fail to compile — that
-/// failure is the honest boundary of this migration, and this note exists so nobody
-/// (including me) later assumes the swap delivered concurrent SQL.
+/// This file's whole purpose is that the boundary cannot drift, but until D-PAGER-9
+/// the negative half was prose — and it drifted: it used to recommend converting
+/// `HeapFile`'s and `BTree`'s cells "to `Mutex`/atomics", which D-PAGER-9 shows is the
+/// wrong primitive for `BTree::root`. Prose cannot fail a build; this can.
 ///
-/// The remaining work to actually get there is: convert `Database`'s interior
-/// mutability (and `HeapFile`'s `fsm`/`cursor`/`stats`, and `BTree`'s `root`) from
-/// `RefCell`/`Cell` to `Mutex`/atomics. That is a separate, independently testable
-/// change with its own failure modes — not a continuation of the pool swap.
+/// Hand-rolled rather than pulled from `static_assertions`, because the workspace has
+/// no external dependencies. Two blanket impls overlap exactly when `$x: Sync`, so the
+/// inferred parameter becomes ambiguous and the build fails.
+macro_rules! assert_not_sync {
+    ($($x:ty),+ $(,)?) => {
+        $(const _: fn() = || {
+            trait AmbiguousIfSync<A> {
+                fn probe() {}
+            }
+            impl<T: ?Sized> AmbiguousIfSync<()> for T {}
+            impl<T: ?Sized + Sync> AmbiguousIfSync<[(); 0]> for T {}
+            let _ = <$x as AmbiguousIfSync<_>>::probe;
+        };)+
+    };
+}
+
+assert_not_sync!(
+    Database,
+    Database<PageCache>,
+    keel_heap::HeapFile<'static, PageCache>,
+    keel_btree::BTree<'static, PageCache>,
+);
+
+/// Why the three types above are `!Sync`, and what it would actually take to change
+/// that — corrected by D-PAGER-8/9, which superseded the original advice here.
+///
+/// * `Database` — four `RefCell`s. D-PAGER-8 instrumented them, found one re-entrant
+///   borrow (`q_error` holding `stats` across `select`), and removed it. Deadlock-clear.
+/// * `HeapFile` — one `RefCell` (`fsm`, two leaf borrow sites, cannot re-enter) plus
+///   `Cell` counters.
+/// * `BTree` — a single `Cell<PageId>` root.
+///
+/// The deadlock surface is closed. What remains is **atomicity, not deadlock**:
+/// `BTree::insert` reads `root`, performs a whole recursive descent, a page allocation
+/// and an internal-node write, then writes `root`. An `AtomicU32` would satisfy `Sync`
+/// and still lose a concurrent root split, leaking the loser's subtree. A root split
+/// needs mutual exclusion over the *operation*. See D-PAGER-9.
 #[test]
 fn shared_use_across_threads_still_needs_a_mutex() {
     use keel_cbuffer::{NoWal, PageFormat};
