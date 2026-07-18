@@ -1,20 +1,3 @@
-//! A streaming (Volcano) executor — an *independent* SELECT implementation, so
-//! the storage engine has two engines to differ against (§7.1): this one and the
-//! materializing reference engine.
-//!
-//! Pull-based iterator operators (Scan → Filter → Project → Distinct → Sort →
-//! Limit) run tuple-at-a-time; `Sort`/`Distinct` are the blocking operators.
-//! Multi-table queries run through a left-deep **hash join** (`try_stream_join`,
-//! inner + left equijoins); grouped/aggregated queries run through a **hash
-//! aggregate** (`run_aggregate` — GROUP BY / HAVING and the five aggregates), which
-//! implements grouping and reduction here but reuses the shared `eval_public` for
-//! every scalar sub-expression. Single-table, join, and aggregate paths share the
-//! same projection/order/limit tail (`finish`). The planner is deliberately
-//! conservative: subqueries, ORDER BY over a non-projected column, and
-//! non-equijoin/straddling ON clauses return `None`, and `Database::select` falls
-//! back to the materializing reference engine. Every path is exercised by the
-//! differential campaign.
-
 use std::cmp::Ordering;
 
 use keel_sql::refengine::{column_label, eval_public, is_subquery_free, ExecError, ResultSet, Row};
@@ -23,7 +6,6 @@ use keel_types::{Schema, Value};
 
 type Sch = Vec<(String, String)>;
 
-/// A pull-based operator.
 trait Op {
     fn next(&mut self) -> Option<Result<Row, ExecError>>;
 }
@@ -90,7 +72,6 @@ impl Op for Limit {
     }
 }
 
-/// Blocking: drain the child, dedup preserving first-seen order.
 struct Distinct {
     src: std::vec::IntoIter<Row>,
     done: bool,
@@ -121,7 +102,6 @@ impl Op for Distinct {
     }
 }
 
-/// Blocking: drain the child, sort by output-column keys.
 struct Sort {
     src: std::vec::IntoIter<Row>,
     done: bool,
@@ -157,8 +137,6 @@ impl Op for Sort {
     }
 }
 
-/// Total-order wrapper matching the reference engine (numeric cross-type, else
-/// `Value::total_cmp`).
 #[derive(Clone, PartialEq, Eq)]
 struct OrdVal(Value);
 impl PartialOrd for OrdVal {
@@ -184,7 +162,6 @@ impl Ord for OrdVal {
     }
 }
 
-/// Bindings for one table scanned under `alias`.
 fn bindings(alias: &str, schema: &Schema) -> Sch {
     schema
         .columns
@@ -193,9 +170,6 @@ fn bindings(alias: &str, schema: &Schema) -> Sch {
         .collect()
 }
 
-/// Try to run `q` over a single table's `(schema, rows)` with the streaming
-/// executor. Returns `None` if the query is outside the streaming subset (the
-/// caller then uses the materializing path).
 pub fn try_stream(
     q: &Select,
     table_alias: &str,
@@ -209,13 +183,6 @@ pub fn try_stream(
     finish(q, &bindings(table_alias, schema), rows)
 }
 
-/// Try to run a **join** query with the streaming executor, then the shared
-/// projection/aggregation/order/limit tail. When every join is inner and the ON
-/// clauses form a clean equijoin graph, a **cost-based greedy reordering**
-/// (`join_plan`) picks the left-deep order that minimizes estimated intermediate
-/// cardinality; otherwise the tables fold in FROM order. Returns `None` — deferring
-/// to the materializing oracle — whenever it cannot prove equivalence (a
-/// non-equijoin ON, an ON that straddles both sides ambiguously, or a subquery).
 pub fn try_stream_join(
     q: &Select,
     tables: &[(String, Schema, Vec<Row>)],
@@ -235,8 +202,6 @@ pub fn try_stream_join(
     finish(q, &sch, rows)
 }
 
-/// The cost-based table order the planner would choose (as FROM-table indices), or
-/// `None` if the query folds in FROM order. For tests / a mini-EXPLAIN.
 pub fn planned_join_order(
     from: &keel_sql::FromClause,
     tables: &[(String, Schema, Vec<Row>)],
@@ -244,8 +209,6 @@ pub fn planned_join_order(
     join_plan(from, tables).map(|steps| steps.iter().map(|s| s.table).collect())
 }
 
-/// The FROM-order left-deep fold (the fallback when the plan can't be reordered —
-/// e.g. an outer join or an ambiguous ON).
 fn fold_from_order(
     from: &keel_sql::FromClause,
     tables: &[(String, Schema, Vec<Row>)],
@@ -265,17 +228,12 @@ fn fold_from_order(
     Some((sch, rows))
 }
 
-/// One step of a reordered plan: the table to fold in, the equijoin key pair
-/// connecting it to the already-joined set (`None` for the starting table), and any
-/// extra equijoin predicates to apply as a residual filter (a table connected by
-/// more than one edge).
 struct PlanStep {
     table: usize,
     key: Option<(Expr, Expr)>,
     residuals: Vec<Expr>,
 }
 
-/// An equijoin edge between two FROM tables, `akey`(of table `a`) `=` `bkey`(of `b`).
 struct Edge {
     a: usize,
     akey: Expr,
@@ -283,8 +241,6 @@ struct Edge {
     bkey: Expr,
 }
 
-/// The unique table index whose schema binds every column of `e`; `None` if zero or
-/// more than one table qualifies (an unqualified or straddling reference).
 fn sole_table(e: &Expr, schs: &[Sch]) -> Option<usize> {
     let mut found = None;
     for (i, sch) in schs.iter().enumerate() {
@@ -298,7 +254,6 @@ fn sole_table(e: &Expr, schs: &[Sch]) -> Option<usize> {
     found
 }
 
-/// Distinct non-null values of `key` over `rows` (for equijoin selectivity).
 fn ndv(key: &Expr, sch: &Sch, rows: &[Row]) -> usize {
     let mut seen = std::collections::BTreeSet::new();
     for r in rows {
@@ -311,17 +266,12 @@ fn ndv(key: &Expr, sch: &Sch, rows: &[Row]) -> usize {
     seen.len().max(1)
 }
 
-/// Estimated selectivity of an equijoin edge: `1 / max(ndv_a, ndv_b)` — the textbook
-/// estimate, computed exactly over the (in-memory) rows.
 fn edge_selectivity(e: &Edge, tables: &[(String, Schema, Vec<Row>)], schs: &[Sch]) -> f64 {
     let na = ndv(&e.akey, &schs[e.a], &tables[e.a].2);
     let nb = ndv(&e.bkey, &schs[e.b], &tables[e.b].2);
     1.0 / na.max(nb) as f64
 }
 
-/// Compute a cost-based greedy join order. Returns `None` (fall back to FROM order)
-/// unless every join is inner and every ON is a clean two-table equijoin, and the
-/// graph is connected (no cross product).
 fn join_plan(
     from: &keel_sql::FromClause,
     tables: &[(String, Schema, Vec<Row>)],
@@ -367,14 +317,12 @@ fn join_plan(
     build_steps(&order, &edges)
 }
 
-/// True if `t` has an equijoin edge to any table in `mask`.
 fn connects(t: usize, mask: u32, edges: &[Edge]) -> bool {
     edges
         .iter()
         .any(|e| (e.a == t && (mask >> e.b) & 1 == 1) || (e.b == t && (mask >> e.a) & 1 == 1))
 }
 
-/// An edge joining `t` to some table in `mask` (the caller has checked one exists).
 fn connecting_edge(t: usize, mask: u32, edges: &[Edge]) -> &Edge {
     edges
         .iter()
@@ -382,10 +330,6 @@ fn connecting_edge(t: usize, mask: u32, edges: &[Edge]) -> &Edge {
         .expect("connecting_edge requires a connected table")
 }
 
-/// **Selinger left-deep dynamic program.** `best[S]` is the minimum-cost left-deep
-/// join order for the table set `S` (bitmask) and its estimated cardinality; cost
-/// is the classic sum of intermediate cardinalities. Returns the optimal full
-/// ordering, or `None` if the join graph is disconnected (a cross product).
 fn dp_order(
     n: usize,
     sizes: &[usize],
@@ -431,8 +375,6 @@ fn dp_order(
     best[full as usize].take().map(|(_, _, order)| order)
 }
 
-/// Turn a chosen table order into fold steps: each table after the first is keyed
-/// by an edge to the already-joined prefix, with any further edges as residuals.
 fn build_steps(order: &[usize], edges: &[Edge]) -> Option<Vec<PlanStep>> {
     let mut joined_mask: u32 = 1 << order[0];
     let mut steps = vec![PlanStep {
@@ -468,8 +410,6 @@ fn build_steps(order: &[usize], edges: &[Edge]) -> Option<Vec<PlanStep>> {
     Some(steps)
 }
 
-/// Fold the tables in the reordered plan's order (all inner joins), applying any
-/// residual equijoin predicates after each hash join.
 fn fold_reordered(
     tables: &[(String, Schema, Vec<Row>)],
     steps: &[PlanStep],
@@ -506,9 +446,6 @@ fn fold_reordered(
     Some((sch, rows))
 }
 
-/// The shared tail: expand SELECT items, apply WHERE, then either projection or
-/// (for a grouped/aggregated query) hash aggregation, then Distinct/Sort/Limit over
-/// `(sch, rows)`. `None` if any item or clause is ineligible for streaming.
 fn finish(q: &Select, sch: &Sch, rows: Vec<Row>) -> Option<Result<ResultSet, ExecError>> {
     if let Some(f) = &q.filter {
         if !is_subquery_free(f) {
@@ -629,13 +566,10 @@ fn finish(q: &Select, sch: &Sch, rows: Vec<Row>) -> Option<Result<ResultSet, Exe
     }))
 }
 
-/// Public: does this query produce grouped/aggregated output? (Telemetry, so the
-/// caller can record that the streaming aggregate path — not the fallback — ran.)
 pub fn is_aggregate(q: &Select) -> bool {
     needs_aggregation(q)
 }
 
-/// Whether `q` produces grouped/aggregated output.
 fn needs_aggregation(q: &Select) -> bool {
     !q.group_by.is_empty()
         || q.having.is_some()
@@ -644,8 +578,6 @@ fn needs_aggregation(q: &Select) -> bool {
             .any(|it| matches!(it, SelectItem::Expr(e, _) if contains_agg(e)))
 }
 
-/// Run the aggregate path: WHERE-filter, group, reduce, apply HAVING, and project
-/// each surviving group to a row (in `exprs` order).
 fn run_aggregate(
     q: &Select,
     sch: &Sch,
@@ -685,8 +617,6 @@ fn run_aggregate(
     Ok(out)
 }
 
-/// Group `rows` by the GROUP BY key values, preserving first-seen order. An empty
-/// GROUP BY is a single group over all rows (so `COUNT(*)` on no rows is 0).
 fn group_rows(group_by: &[Expr], sch: &Sch, rows: &[Row]) -> Result<Vec<Vec<Row>>, ExecError> {
     if group_by.is_empty() {
         return Ok(vec![rows.to_vec()]);
@@ -710,8 +640,6 @@ fn group_rows(group_by: &[Expr], sch: &Sch, rows: &[Row]) -> Result<Vec<Vec<Row>
     Ok(groups)
 }
 
-/// Replace every aggregate node in `e` with a literal of its value over `group`;
-/// the rest of the tree is left for `eval_public`.
 fn substitute_aggs(e: &Expr, sch: &Sch, group: &[Row]) -> Result<Expr, ExecError> {
     Ok(match e {
         Expr::Aggregate {
@@ -777,7 +705,6 @@ fn substitute_aggs(e: &Expr, sch: &Sch, group: &[Row]) -> Result<Expr, ExecError
     })
 }
 
-/// Reduce one aggregate over a group's rows (NULLs skipped, per SQL).
 fn reduce_aggregate(
     func: AggFunc,
     arg: Option<&Expr>,
@@ -838,8 +765,6 @@ fn f64_of(v: &Value) -> Option<f64> {
 fn f64_sum(vals: &[Value]) -> f64 {
     vals.iter().filter_map(f64_of).sum()
 }
-/// SUM: integer inputs stay a wrapping i64 sum; any float promotes to f64 (matching
-/// the reference engine's rule).
 fn sum_values(vals: &[Value]) -> Value {
     if vals.iter().any(|v| matches!(v, Value::Double(_))) {
         Value::Double(f64_sum(vals))
@@ -853,7 +778,6 @@ fn sum_values(vals: &[Value]) -> Value {
     }
 }
 
-/// Does every column referenced by `e` resolve (unambiguously) in `sch`?
 fn binds_in(e: &Expr, sch: &Sch) -> bool {
     match e {
         Expr::Column { table, name } => {
@@ -869,8 +793,6 @@ fn binds_in(e: &Expr, sch: &Sch) -> bool {
     }
 }
 
-/// If `on` is a pure equijoin `L = R` with one side resolving only in the left
-/// schema and the other only in the right, return `(left_key, right_key)`.
 fn extract_equijoin(on: &Expr, lsch: &Sch, rsch: &Sch) -> Option<(Expr, Expr)> {
     let Expr::Binary {
         op: keel_sql::BinOp::Eq,
@@ -897,9 +819,6 @@ fn extract_equijoin(on: &Expr, lsch: &Sch, rsch: &Sch) -> Option<(Expr, Expr)> {
     }
 }
 
-/// Hash-join the left stream against the right table on `lkey = rkey`. Builds the
-/// hash table on the right side; NULL keys never match (SQL `NULL = NULL` is not
-/// TRUE). For a LEFT join, unmatched left rows emit NULLs for the right columns.
 fn hash_join(
     kind: keel_sql::JoinKind,
     lsch: &Sch,

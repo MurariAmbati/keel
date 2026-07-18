@@ -1,25 +1,3 @@
-//! Crash campaign: the heap's checkpoint-then-seal is a hard durability barrier,
-//! and a torn page is always *detected* by its checksum — never silently read.
-//!
-//! Each seed inserts `N` records spanning several pages, `checkpoint`s them (now
-//! durable), then `seal`s the frontier so those pages are frozen, then inserts `N`
-//! more *without* checkpointing — through a cache small enough that the newer round
-//! steal-and-evicts into the un-synced pending set. A vicious crash then drops,
-//! tears, and reorders that pending set. Reopening from the durable image, the
-//! guarantee a no-WAL heap over `cbuffer` provides is:
-//!
-//! * **deterministically**, every one of the `N` committed records is present —
-//!   the sealed pages were synced and never re-dirtied, so the crash cannot touch
-//!   them (this holds on *every* seed, not just lucky ones); and
-//! * every **intact** page yields only well-formed, in-range records — never
-//!   garbage, never a torn record; and
-//! * a torn page (an un-synced tail write the crash mangled) is **detected** by its
-//!   checksum, not misread.
-//!
-//! Without `seal`, a checkpointed page can be re-dirtied by a later insert reusing
-//! its free space, and *that* overwrite can tear — which is precisely the case a
-//! redo/undo WAL exists to recover, composed on top and out of scope here.
-
 use keel_cbuffer::PageCache;
 use keel_faultfs::{FaultConfig, FaultDisk};
 use keel_page::{PageType, SlottedPage};

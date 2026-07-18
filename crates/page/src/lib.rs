@@ -1,53 +1,15 @@
-//! The 8 KB slotted page — KEEL's unit of storage (D4).
-//!
-//! Every page carries a header `{checksum, pageLSN, flags, type, version,
-//! slotCount, freeStart, freeEnd}` and a body organized as a slotted page: a
-//! slot array growing forward from the header, tuple bytes packed from the tail,
-//! a free gap between them. Two invariants are load-bearing everywhere above:
-//!
-//!   * **Slot indices are stable.** A slot's index never changes once assigned,
-//!     even across compaction. A RID `(page, slot)` is a permanent address; the
-//!     heap and every index depend on that (§2.2). Deletes *tombstone* a slot;
-//!     they never renumber.
-//!   * **Every page self-verifies.** A CRC32 over the page body catches torn
-//!     writes and bit-rot on read, which is exactly what makes the crash
-//!     campaign able to tell "recovered correctly" from "recovered garbage".
-//!
-//! This is the sole crate that may use `unsafe` (D11); the implementation here
-//! is nonetheless entirely safe — bounds-checked byte accessors, no transmute.
-//! The allowance only reserves the boundary for a future zero-copy optimization
-//! that would be measured, not assumed.
-
 use std::fmt;
 
-/// Page size in bytes. 8 KB (D4).
 pub const PAGE_SIZE: usize = 8192;
 
-/// Fixed page-header size. Layout (little-endian):
-/// ```text
-///  0..4   checksum   u32   CRC32 of bytes [4, PAGE_SIZE)
-///  4..12  page_lsn   u64   LSN of the last log record that touched this page
-/// 12..14  flags      u16   FPW-logged bit, etc. (set by higher layers)
-/// 14..15  page_type  u8    Meta / Heap / BTreeLeaf / BTreeInternal / FreeList / Overflow
-/// 15..16  version    u8    page format version
-/// 16..18  slot_count u16   number of slots (live + tombstoned)
-/// 18..20  free_start u16   end of the slot array (next-slot offset)
-/// 20..22  free_end   u16   start of the tuple heap (grows down from PAGE_SIZE)
-/// 22..24  reserved   u16
-/// 24..32  extra      u64   generic link (heap: 0; B-tree: sibling/next page)
-/// ```
 pub const HEADER_SIZE: usize = 32;
 
-/// Size of one slot entry: `{offset: u16, len: u16}`.
 pub const SLOT_SIZE: usize = 4;
 
-/// Current page format version.
 pub const PAGE_FORMAT_VERSION: u8 = 1;
 
-/// The largest tuple that can fit in an otherwise-empty page.
 pub const MAX_TUPLE_SIZE: usize = PAGE_SIZE - HEADER_SIZE - SLOT_SIZE;
 
-/// A slot index within a page. Combined with a page id it forms a RID.
 pub type SlotId = u16;
 
 const OFF_CHECKSUM: usize = 0;
@@ -60,8 +22,6 @@ const OFF_FREE_START: usize = 18;
 const OFF_FREE_END: usize = 20;
 const OFF_EXTRA: usize = 24;
 
-/// What a page holds. Stored in the header so `pageview`/`dbcheck` can interpret
-/// a raw page without external context.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PageType {
@@ -87,17 +47,11 @@ impl PageType {
     }
 }
 
-/// Errors from page operations. All are recoverable by the caller (e.g. the
-/// heap responds to `PageFull` by allocating another page).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PageError {
-    /// Not enough room, even after compaction.
     PageFull,
-    /// The tuple is larger than any page could hold (needs overflow pages).
     TupleTooLarge,
-    /// The slot index is out of range or refers to a tombstone.
     BadSlot,
-    /// The header is structurally impossible (used by `verify`).
     Corrupt(&'static str),
 }
 
@@ -136,7 +90,6 @@ const fn crc32_table() -> [u32; 256] {
 
 static CRC32_TABLE: [u32; 256] = crc32_table();
 
-/// CRC32/IEEE of a byte slice.
 pub fn crc32(data: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
     for &b in data {
@@ -173,17 +126,11 @@ fn wr_u64(b: &mut [u8], at: usize, v: u64) {
     b[at..at + 8].copy_from_slice(&v.to_le_bytes());
 }
 
-/// A slotted page over some byte buffer `B`. `B = &mut [u8]` views a buffer-pool
-/// frame in place; `B = PageBuf` owns one for tests and standalone use.
-///
-/// Read methods require `B: AsRef<[u8]>`; mutating methods additionally require
-/// `B: AsMut<[u8]>`. The buffer must be exactly `PAGE_SIZE` bytes.
 pub struct SlottedPage<B> {
     buf: B,
 }
 
 impl<B: AsRef<[u8]>> SlottedPage<B> {
-    /// Wrap an already-initialized page buffer. Panics if not `PAGE_SIZE` long.
     pub fn from_bytes(buf: B) -> Self {
         assert_eq!(
             buf.as_ref().len(),
@@ -225,13 +172,10 @@ impl<B: AsRef<[u8]>> SlottedPage<B> {
         rd_u32(self.b(), OFF_CHECKSUM)
     }
 
-    /// The checksum this page's bytes currently imply (body = [4, PAGE_SIZE)).
     pub fn computed_checksum(&self) -> u32 {
         crc32(&self.b()[OFF_PAGE_LSN..])
     }
 
-    /// Does the stored checksum match the body? A `false` here is how a torn
-    /// write is detected on read.
     pub fn verify_checksum(&self) -> bool {
         self.stored_checksum() == self.computed_checksum()
     }
@@ -241,7 +185,6 @@ impl<B: AsRef<[u8]>> SlottedPage<B> {
         (rd_u16(self.b(), base), rd_u16(self.b(), base + 2))
     }
 
-    /// Bytes of a live tuple, or `None` if the slot is out of range or dead.
     pub fn get(&self, slot: SlotId) -> Option<&[u8]> {
         if slot >= self.slot_count() {
             return None;
@@ -253,27 +196,20 @@ impl<B: AsRef<[u8]>> SlottedPage<B> {
         Some(&self.b()[off as usize..off as usize + len as usize])
     }
 
-    /// Is this slot a live tuple?
     pub fn is_live(&self, slot: SlotId) -> bool {
         slot < self.slot_count() && self.read_slot(slot).0 != 0
     }
 
-    /// Count of live (non-tombstone) tuples.
     pub fn live_count(&self) -> u16 {
         (0..self.slot_count())
             .filter(|&s| self.read_slot(s).0 != 0)
             .count() as u16
     }
 
-    /// Contiguous free bytes between the slot array and the tuple heap.
     pub fn free_space(&self) -> usize {
         self.free_end() as usize - self.free_start() as usize
     }
 
-    /// Contiguous free bytes that *would* be available after a compaction —
-    /// i.e. current free plus space held by tombstones. The heap's free-space
-    /// map tracks this so deleted space becomes reusable without eagerly
-    /// compacting on every delete.
     pub fn compactable_free(&self) -> usize {
         let mut sum_live = 0usize;
         for s in 0..self.slot_count() {
@@ -285,13 +221,10 @@ impl<B: AsRef<[u8]>> SlottedPage<B> {
         PAGE_SIZE - HEADER_SIZE - self.slot_count() as usize * SLOT_SIZE - sum_live
     }
 
-    /// Iterate `(slot, bytes)` over live tuples in slot order.
     pub fn iter(&self) -> impl Iterator<Item = (SlotId, &[u8])> {
         (0..self.slot_count()).filter_map(move |s| self.get(s).map(|d| (s, d)))
     }
 
-    /// Structural self-check for `dbcheck`: header fields are consistent and no
-    /// slot points outside the tuple heap or overlaps the slot array.
     pub fn validate_structure(&self) -> Result<(), PageError> {
         let n = self.slot_count() as usize;
         let fs = self.free_start() as usize;
@@ -322,15 +255,12 @@ impl<B: AsRef<[u8]>> SlottedPage<B> {
         Ok(())
     }
 
-    /// Borrow the raw bytes (for the pager to write to disk).
     pub fn as_bytes(&self) -> &[u8] {
         self.b()
     }
 }
 
 impl<B: AsRef<[u8]> + AsMut<[u8]>> SlottedPage<B> {
-    /// Format a fresh, empty page of the given type. Zeros everything, sets the
-    /// header, and stamps a valid checksum.
     pub fn init(mut buf: B, page_type: PageType) -> Self {
         {
             let b = buf.as_mut();
@@ -376,8 +306,6 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> SlottedPage<B> {
         wr_u16(self.m(), base + 2, len);
     }
 
-    /// Recompute and store the page checksum. The pager calls this immediately
-    /// before writing a page to disk.
     pub fn recompute_checksum(&mut self) {
         let ck = crc32(&self.b()[OFF_PAGE_LSN..]);
         wr_u32(self.m(), OFF_CHECKSUM, ck);
@@ -387,8 +315,6 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> SlottedPage<B> {
         (0..self.slot_count()).find(|&s| self.read_slot(s).0 == 0)
     }
 
-    /// Insert a tuple, returning its (stable) slot id. Reuses a tombstoned slot
-    /// when one exists, so RIDs are recycled without growing the slot array.
     pub fn insert(&mut self, data: &[u8]) -> Result<SlotId, PageError> {
         if data.len() > MAX_TUPLE_SIZE {
             return Err(PageError::TupleTooLarge);
@@ -418,10 +344,6 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> SlottedPage<B> {
         Ok(slot)
     }
 
-    /// Replace the contents of a live slot. Shrinks in place; grows by
-    /// relocation, and is transactional on failure — if the new value doesn't
-    /// fit even after compaction, the old value is left intact and `PageFull`
-    /// is returned so the caller can forward the tuple to another page (§2.2).
     pub fn set(&mut self, slot: SlotId, data: &[u8]) -> Result<(), PageError> {
         if data.len() > MAX_TUPLE_SIZE {
             return Err(PageError::TupleTooLarge);
@@ -457,8 +379,6 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> SlottedPage<B> {
         }
     }
 
-    /// Tombstone a slot. The tuple bytes are reclaimed on the next compaction.
-    /// Returns whether a live tuple was there.
     pub fn delete(&mut self, slot: SlotId) -> bool {
         if slot >= self.slot_count() {
             return false;
@@ -470,8 +390,6 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> SlottedPage<B> {
         true
     }
 
-    /// Reclaim dead space by repacking live tuples against the page tail. Slot
-    /// indices are preserved (RIDs survive); tombstones remain tombstones.
     pub fn compact(&mut self) {
         let n = self.slot_count();
         let mut scratch = [0u8; PAGE_SIZE];
@@ -500,17 +418,14 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> SlottedPage<B> {
     }
 }
 
-/// An owned, heap-allocated page buffer (`Box<[u8; PAGE_SIZE]>` under the hood).
 #[derive(Clone)]
 pub struct PageBuf(Box<[u8]>);
 
 impl PageBuf {
-    /// A zeroed buffer (not a valid page until `init`/loaded).
     pub fn zeroed() -> Self {
         PageBuf(vec![0u8; PAGE_SIZE].into_boxed_slice())
     }
 
-    /// A freshly formatted page of the given type.
     pub fn new(page_type: PageType) -> SlottedPage<PageBuf> {
         SlottedPage::init(PageBuf::zeroed(), page_type)
     }
@@ -527,19 +442,11 @@ impl AsMut<[u8]> for PageBuf {
     }
 }
 
-/// Raw header access for page bodies that are *not* slotted (e.g. B-tree nodes),
-/// which need the shared header (checksum, LSN, type, sibling link) but define
-/// their own body. The checksum convention is identical — CRC32 over
-/// `[4, PAGE_SIZE)` — so the buffer pool, `dbcheck`, and the WAL treat every page
-/// uniformly regardless of body layout.
 pub mod raw {
     use super::*;
 
-    /// Bytes available for a non-slotted body, after the shared header.
     pub const BODY_CAPACITY: usize = PAGE_SIZE - HEADER_SIZE;
 
-    /// Zero a buffer and stamp a minimal header (type + version). The caller
-    /// fills the body and lets the pager checksum it on write.
     pub fn init_header(buf: &mut [u8], page_type: PageType) {
         assert_eq!(
             buf.len(),
@@ -563,7 +470,6 @@ pub mod raw {
     pub fn set_page_lsn(buf: &mut [u8], v: u64) {
         wr_u64(buf, OFF_PAGE_LSN, v);
     }
-    /// The generic header link word — B-tree nodes pack sibling pointers here.
     pub fn extra(buf: &[u8]) -> u64 {
         rd_u64(buf, OFF_EXTRA)
     }
@@ -571,7 +477,6 @@ pub mod raw {
         wr_u64(buf, OFF_EXTRA, v);
     }
 
-    /// The body region `[HEADER_SIZE, PAGE_SIZE)`.
     pub fn body(buf: &[u8]) -> &[u8] {
         &buf[HEADER_SIZE..]
     }
@@ -579,7 +484,6 @@ pub mod raw {
         &mut buf[HEADER_SIZE..]
     }
 
-    /// Compute and store the checksum (same convention as slotted pages).
     pub fn stamp_checksum(buf: &mut [u8]) {
         let ck = crc32(&buf[OFF_PAGE_LSN..]);
         wr_u32(buf, OFF_CHECKSUM, ck);

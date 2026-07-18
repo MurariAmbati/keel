@@ -1,27 +1,3 @@
-//! Normalized keys (D9): every index key is a `memcmp`-comparable byte string.
-//!
-//! Encoding a typed tuple to bytes whose lexicographic order equals the tuple's
-//! logical order is the single decision that makes the B-tree type-oblivious and
-//! deletes a whole family of comparator bugs. The rules:
-//!
-//!   * **Presence tag** — each field is prefixed with `0x00` (NULL) or `0x01`
-//!     (present), so NULL sorts below every value (NULL-low) and composite keys
-//!     parse unambiguously.
-//!   * **Integers** — big-endian with the sign bit flipped, so negatives sort
-//!     below positives under unsigned byte compare.
-//!   * **Doubles** — the IEEE total-order transform (shared with `keel-types`),
-//!     big-endian.
-//!   * **Bool** — one byte, `0x00 < 0x01`.
-//!   * **Strings** — order-preserving escape: `0x00 -> 0x00 0xFF`, terminated by
-//!     `0x00 0x00`. A prefix sorts before its extensions; embedded NULs are
-//!     safe.
-//!   * **Composite** — concatenation. Because every field encoding is either
-//!     fixed-width or self-terminating, concatenation preserves tuple order and
-//!     stays decodable.
-//!
-//! The property test at the bottom is the whole point: for random typed values,
-//! sorting by encoded bytes must equal sorting by [`keel_types::Value`] order.
-
 use keel_types::{f64_total_order_bits, ColumnType, Value};
 
 const TAG_NULL: u8 = 0x00;
@@ -31,7 +7,6 @@ const STR_ESC: u8 = 0x00;
 const STR_ESC_MARK: u8 = 0xFF;
 const STR_TERM: u8 = 0x00;
 
-/// Append a single value's normalized encoding to `out`.
 pub fn encode_value_into(out: &mut Vec<u8>, ty: ColumnType, v: &Value) {
     if v.is_null() {
         out.push(TAG_NULL);
@@ -67,14 +42,12 @@ pub fn encode_value_into(out: &mut Vec<u8>, ty: ColumnType, v: &Value) {
     }
 }
 
-/// Encode a single value to its own key bytes.
 pub fn encode_value(ty: ColumnType, v: &Value) -> Vec<u8> {
     let mut out = Vec::new();
     encode_value_into(&mut out, ty, v);
     out
 }
 
-/// Encode a composite key from a typed tuple. Panics if arities disagree.
 pub fn encode_key(types: &[ColumnType], values: &[Value]) -> Vec<u8> {
     assert_eq!(types.len(), values.len(), "key arity mismatch");
     let mut out = Vec::new();
@@ -84,7 +57,6 @@ pub fn encode_key(types: &[ColumnType], values: &[Value]) -> Vec<u8> {
     out
 }
 
-/// Errors from key decoding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyError {
     Truncated,
@@ -93,8 +65,6 @@ pub enum KeyError {
     NotUtf8,
 }
 
-/// Decode a composite key back into values (for B-tree separators, `dbcheck`,
-/// and `pageview`).
 pub fn decode_key(types: &[ColumnType], mut bytes: &[u8]) -> Result<Vec<Value>, KeyError> {
     let mut out = Vec::with_capacity(types.len());
     for &ty in types {
@@ -166,7 +136,6 @@ fn decode_present(bytes: &mut &[u8], ty: ColumnType) -> Result<Value, KeyError> 
     })
 }
 
-/// Inverse of [`keel_types::f64_total_order_bits`].
 fn f64_from_total_order_bits(ordered: u64) -> f64 {
     let bits = if ordered & 0x8000_0000_0000_0000 != 0 {
         ordered ^ 0x8000_0000_0000_0000

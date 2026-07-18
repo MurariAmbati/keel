@@ -1,49 +1,3 @@
-//! Write-ahead log and recovery — the full ARIES ladder, rungs 1–3 (§4, D5).
-//!
-//! The rung is selected by [`Policy`]. **Rung 2** (steal + no-force + FPW) adds:
-//! dirty pages may be stolen to disk before commit (still WAL-before-data);
-//! commit is durable on the log fsync alone (data is written lazily and redone
-//! at recovery); and the first modification of a page each epoch logs a
-//! **full-page image** so a torn on-disk page is fully reconstructable — which
-//! is what lets the crash campaign turn tearing on.
-//!
-//! **Rung 3** completes ARIES. Records carry before-images, so a transaction can
-//! be undone; a runtime abort (or a loser at recovery) rolls back physically,
-//! writing a **Compensation Log Record** per change whose `undo_next` skip-pointer
-//! makes an interrupted undo resumable — a CLR is never itself undone.
-//! [`recover_aries`] runs the three passes: Analysis (rebuild the ATT/DPT from the
-//! last checkpoint), Redo (repeat history from the minimum recLSN — winners *and*
-//! losers), Undo (roll losers back, newest first). Running it any number of times
-//! converges to the same committed state (recovery-of-recovery). [`TxnStore::checkpoint`]
-//! bounds the redo start (D-WAL-2).
-//!
-//! Rung 1 is **redo-only WAL with a no-steal/force buffer policy**: the harness
-//! that proves the WAL plumbing before undo, CLRs, and checkpoints arrive
-//! (rungs 2–3). Its shape:
-//!
-//!   * **`log_and_apply`** — every page mutation appends a redo record, stamps
-//!     the page's `pageLSN` with that record's LSN, and applies the change. There
-//!     is no other way to mutate a page in this layer, so "mutation without
-//!     logging" is structurally impossible.
-//!   * **no-steal** — a dirty page is never written to disk before its
-//!     transaction commits (enforced in the buffer pool). So an uncommitted
-//!     transaction leaves *nothing* on disk, and recovery needs no undo pass.
-//!   * **force** — at commit, the log is fsync'd through the COMMIT record
-//!     (**WAL-before-data**), then the transaction's dirty pages are flushed and
-//!     the data file fsync'd.
-//!   * **recovery = redo** — replay every committed transaction's records in LSN
-//!     order, guarded per page by `pageLSN < recordLSN`. Because rung 1 keeps the
-//!     whole log (checkpoints are rung 3), this reconstructs committed state
-//!     even from an empty or torn data file: the log is the source of truth.
-//!
-//! The transactions here are serial (D3: concurrency is P7), which is exactly
-//! what makes no-steal/force clean — no two transactions share a dirty page.
-//!
-//! The redo record is a **byte-range after-image** (`page`, body `offset`,
-//! `bytes`) — physical within the page. Page-logical records ("insert tuple at
-//! slot k") are a smaller-log refinement for later; the after-image is correct
-//! and layout-agnostic, which is what rung 1 wants.
-
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -54,7 +8,6 @@ use keel_page::{crc32, raw, PageType};
 use keel_pager::RecoveryPager;
 use keel_vfs::BlockFile;
 
-/// A log sequence number — a byte offset into the log stream. `0` means "none".
 pub type Lsn = u64;
 pub const NULL_LSN: Lsn = 0;
 
@@ -69,12 +22,10 @@ const TAG_FULL_PAGE: u8 = 5;
 const TAG_CLR: u8 = 6;
 const TAG_CHECKPOINT: u8 = 7;
 
-/// Errors from the WAL / transactional store.
 #[derive(Debug)]
 pub enum WalError {
     Io(io::Error),
     Buffer(BufferError),
-    /// The log stream was structurally invalid (bad magic).
     BadLog,
 }
 impl std::fmt::Display for WalError {
@@ -92,8 +43,6 @@ impl From<io::Error> for WalError {
         WalError::Io(e)
     }
 }
-/// The pager seam reports the same three failures under a different name; fold them
-/// into the existing variant so the public error type is unchanged by the migration.
 impl From<keel_pager::PagerError> for WalError {
     fn from(e: keel_pager::PagerError) -> Self {
         WalError::Buffer(match e {
@@ -110,7 +59,6 @@ impl From<BufferError> for WalError {
 }
 pub type Result<T> = std::result::Result<T, WalError>;
 
-/// The body of a log record.
 #[derive(Clone, Debug)]
 pub enum Kind {
     Begin,
@@ -120,42 +68,30 @@ pub enum Kind {
         page: PageId,
         ptype: u8,
     },
-    /// A byte-range change carrying both undo (`before`) and redo (`after`)
-    /// images — the ARIES update record.
     Update {
         page: PageId,
         offset: u32,
         before: Vec<u8>,
         after: Vec<u8>,
     },
-    /// A full-page redo after-image (FPW, rung 2) plus the byte-range undo image
-    /// for the same change, so a first-touch write is still undoable.
     FullPage {
         page: PageId,
         after: Vec<u8>,
         offset: u32,
         before: Vec<u8>,
     },
-    /// A Compensation Log Record (rung 3): the redo of an undo. `bytes` is the
-    /// before-image being reinstated at `offset`; `undo_next` is the LSN to
-    /// continue undo from (the undone record's `prev_lsn`), which makes recovery
-    /// of an interrupted undo idempotent — a CLR is never itself undone.
     Clr {
         page: PageId,
         offset: u32,
         bytes: Vec<u8>,
         undo_next: Lsn,
     },
-    /// A fuzzy checkpoint (rung 3): a snapshot of the active-transaction table
-    /// `(txn, lastLSN)` and the dirty-page table `(page, recLSN)`, taken without
-    /// quiescing. Bounds recovery's redo start and identifies losers.
     Checkpoint {
         att: Vec<(u64, Lsn)>,
         dpt: Vec<(PageId, Lsn)>,
     },
 }
 
-/// A single log record.
 #[derive(Clone, Debug)]
 pub struct LogRecord {
     pub lsn: Lsn,
@@ -250,8 +186,6 @@ fn rd_u64(b: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(a)
 }
 
-/// Parse one record at `pos`. Returns `None` on a torn/incomplete tail (bad
-/// length or CRC) — the honest end of the durable log.
 fn parse_at(bytes: &[u8], pos: usize) -> Option<(LogRecord, usize)> {
     if pos + 4 > bytes.len() {
         return None;
@@ -353,8 +287,6 @@ fn parse_at(bytes: &[u8], pos: usize) -> Option<(LogRecord, usize)> {
     ))
 }
 
-/// The append-only log. Appends buffer in memory; `flush` writes them to the
-/// file and fsyncs. `durable` is the fsync'd prefix; `end` is the appended one.
 pub struct Log {
     file: Arc<dyn BlockFile>,
     end: u64,
@@ -363,7 +295,6 @@ pub struct Log {
 }
 
 impl Log {
-    /// Start a fresh log on an empty file (buffers the magic; written on flush).
     pub fn create(file: Arc<dyn BlockFile>) -> Log {
         Log {
             file,
@@ -373,8 +304,6 @@ impl Log {
         }
     }
 
-    /// Continue an existing log, appending at `at` (the end of the valid records,
-    /// so any torn tail is overwritten). Used by recovery to log CLRs.
     pub fn open_for_append(file: Arc<dyn BlockFile>, at: u64) -> Log {
         Log {
             file,
@@ -391,7 +320,6 @@ impl Log {
         self.end
     }
 
-    /// Append a record, returning its LSN (its byte offset).
     pub fn append(&mut self, prev: Lsn, txn: u64, kind: Kind) -> Lsn {
         let lsn = self.end;
         let bytes = serialize(lsn, prev, txn, &kind);
@@ -400,7 +328,6 @@ impl Log {
         lsn
     }
 
-    /// Write all buffered bytes to the file and fsync — the WAL durability point.
     pub fn flush(&mut self) -> io::Result<()> {
         if self.buf.is_empty() {
             return Ok(());
@@ -412,7 +339,6 @@ impl Log {
         Ok(())
     }
 
-    /// Ensure the log is durable through at least `lsn`.
     pub fn flush_until(&mut self, lsn: Lsn) -> io::Result<()> {
         if self.durable < lsn {
             self.flush()?;
@@ -421,15 +347,10 @@ impl Log {
     }
 }
 
-/// Read every intact record from a durable log file (stops at the first
-/// torn/incomplete tail record).
 pub fn read_records(file: &dyn BlockFile) -> Result<Vec<LogRecord>> {
     Ok(read_records_end(file)?.0)
 }
 
-/// Like [`read_records`], but also returns the byte offset just past the last
-/// valid record — where new records (CLRs) may be appended, overwriting any
-/// torn tail.
 pub fn read_records_end(file: &dyn BlockFile) -> Result<(Vec<LogRecord>, u64)> {
     let size = file.size()? as usize;
     let mut bytes = vec![0u8; size];
@@ -451,7 +372,6 @@ pub fn read_records_end(file: &dyn BlockFile) -> Result<(Vec<LogRecord>, u64)> {
     Ok((out, pos as u64))
 }
 
-/// The buffer pool's WAL seam, backed by a real log (D-BUF-1).
 struct LogWal {
     log: Arc<Mutex<Log>>,
 }
@@ -466,30 +386,19 @@ impl WalSync for LogWal {
 
 struct Txn {
     id: u64,
-    /// LSN of this txn's most recent log record (the per-txn backchain head).
     prev: Lsn,
     dirtied: Vec<PageId>,
-    /// In-memory undo info: `(page, body-offset, before-image, undo_next)` in
-    /// apply order. Abort walks this in reverse, writing CLRs.
     undo: Vec<(PageId, usize, Vec<u8>, Lsn)>,
 }
 
-/// The buffer/logging policy — the rung selector of the ARIES ladder (D5).
 #[derive(Clone, Copy, Debug)]
 pub struct Policy {
-    /// Steal: dirty pages may be evicted (and written, WAL-respecting) before
-    /// commit. `false` = no-steal (rung 1).
     pub steal: bool,
-    /// Force: flush the txn's dirty pages and fsync the data file at commit.
-    /// `false` = no-force (rung 2+), where steal writes lazily and recovery redoes.
     pub force: bool,
-    /// Full-page write: the first modification of a page in an epoch logs a full
-    /// after-image, so a torn on-disk page is fully reconstructable (rung 2).
     pub fpw: bool,
 }
 
 impl Policy {
-    /// Rung 1: no-steal, force, no FPW. Trivially recoverable plumbing harness.
     pub fn rung1() -> Self {
         Policy {
             steal: false,
@@ -497,7 +406,6 @@ impl Policy {
             fpw: false,
         }
     }
-    /// Rung 2: steal, no-force, FPW. Redo genuinely required; torn writes survive.
     pub fn rung2() -> Self {
         Policy {
             steal: true,
@@ -507,7 +415,6 @@ impl Policy {
     }
 }
 
-/// WAL/store counters — every stat before every explanation.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WalStats {
     pub commits: u64,
@@ -519,23 +426,17 @@ pub struct WalStats {
     pub checkpoints: u64,
 }
 
-/// A minimal transactional page store: raw byte pages under WAL. Serial
-/// transactions only (one active at a time) — the rung-1/2 plumbing harness; the
-/// heap and B-tree are routed through it in a later phase.
 pub struct TxnStore<P: RecoveryPager = BufferPool> {
     bp: P,
     log: Arc<Mutex<Log>>,
     cur: Mutex<Option<Txn>>,
     next_txn: Cell<u64>,
     policy: Policy,
-    /// Pages that have been full-page-imaged this epoch (since the last
-    /// checkpoint; store lifetime for rung 2, which has no checkpoints yet).
     fpi_done: Mutex<HashSet<PageId>>,
     stats: Cell<WalStats>,
 }
 
 impl TxnStore<BufferPool> {
-    /// Open a rung-1 store (no-steal/force) over fresh data and log files.
     pub fn open(
         data: Arc<dyn BlockFile>,
         log_file: Arc<dyn BlockFile>,
@@ -544,7 +445,6 @@ impl TxnStore<BufferPool> {
         Self::open_with(data, log_file, frames, Policy::rung1())
     }
 
-    /// Open a store with an explicit policy (ladder rung).
     pub fn open_with(
         data: Arc<dyn BlockFile>,
         log_file: Arc<dyn BlockFile>,
@@ -570,9 +470,6 @@ impl TxnStore<BufferPool> {
 }
 
 impl<P: RecoveryPager> TxnStore<P> {
-    /// Open a store over an **already-built pager** and log. This is the seam the
-    /// concurrent `PageCache` enters through; `open`/`open_with` keep constructing a
-    /// `BufferPool` so every existing caller is unaffected.
     pub fn with_pager(bp: P, log: Arc<Mutex<Log>>, policy: Policy) -> Self {
         if !policy.steal {
             bp.set_no_steal();
@@ -602,7 +499,6 @@ impl<P: RecoveryPager> TxnStore<P> {
         keel_pager::Pager::page_count(&self.bp)
     }
 
-    /// Begin a transaction (no other may be active).
     pub fn begin(&self) -> u64 {
         assert!(
             self.cur.lock().unwrap().is_none(),
@@ -620,7 +516,6 @@ impl<P: RecoveryPager> TxnStore<P> {
         id
     }
 
-    /// Create a fresh raw page within the current transaction.
     pub fn create_page(&self, ptype: PageType) -> Result<PageId> {
         let pid = self.bp.alloc_raw(ptype)?;
         let mut cur = self.cur.lock().unwrap();
@@ -641,9 +536,6 @@ impl<P: RecoveryPager> TxnStore<P> {
         Ok(pid)
     }
 
-    /// `log_and_apply`: the sole page-mutation path. Appends a redo record (a
-    /// full-page image on the first touch of a page this epoch when FPW is on,
-    /// else a byte-range after-image), stamps the page LSN, then applies.
     pub fn write(&self, page: PageId, offset: usize, bytes: &[u8]) -> Result<()> {
         let mut cur = self.cur.lock().unwrap();
         let txn = cur.as_mut().expect("no active transaction");
@@ -702,17 +594,12 @@ impl<P: RecoveryPager> TxnStore<P> {
         Ok(())
     }
 
-    /// Read a byte range from a page's body (own-writes visible; serial only).
     pub fn read(&self, page: PageId, offset: usize, len: usize) -> Result<Vec<u8>> {
         Ok(self
             .bp
             .with_page(page, |b| raw::body(b)[offset..offset + len].to_vec())?)
     }
 
-    /// Commit: fsync the log through the COMMIT record (WAL-before-data). Under
-    /// `force`, also flush the txn's dirty pages and fsync the data file; under
-    /// no-force (rung 2+), the log alone makes the commit durable and steal writes
-    /// the data lazily.
     pub fn commit(&self) -> Result<()> {
         let txn = self
             .cur
@@ -735,12 +622,6 @@ impl<P: RecoveryPager> TxnStore<P> {
         Ok(())
     }
 
-    /// Abort: discard the transaction's dirty pages. Under no-steal nothing was
-    /// written, so invalidation cleanly reverts to the durable version. Under
-    /// on redo replaying the committed history to overwrite it. Under steal
-    /// (rung 2/3), a page may already be on disk with this txn's changes, so
-    /// abort performs a real physical undo, writing a Compensation Log Record per
-    /// change (with `undo_next` for resumability) and reinstating the before-image.
     pub fn abort(&self) {
         let mut txn = self
             .cur
@@ -783,17 +664,6 @@ impl<P: RecoveryPager> TxnStore<P> {
         self.bump(|s| s.aborts += 1);
     }
 
-    /// Take a checkpoint (rung 3): snapshot the active-transaction table and the
-    /// dirty-page table into a CHECKPOINT record, then fsync the log. Bounds the
-    /// next recovery's redo pass and opens a new full-page-write epoch.
-    ///
-    /// A *true* fuzzy checkpoint records the DPT without flushing and relies on a
-    /// background writer to eventually fsync stolen pages — we have no background
-    /// writer yet (that arrives with the concurrency phase), so this checkpoint
-    /// flushes and fsyncs the dirty pages itself before recording the (now empty)
-    /// DPT. The DPT/recLSN analysis machinery is the real fuzzy-checkpoint
-    /// mechanism; wiring a background writer makes it fuzzy without changing
-    /// recovery. Recorded as D-WAL-2.
     pub fn checkpoint(&self) -> Result<()> {
         keel_pager::Pager::checkpoint(&self.bp)?;
         let att: Vec<(u64, Lsn)> = self
@@ -815,20 +685,15 @@ impl<P: RecoveryPager> TxnStore<P> {
     }
 }
 
-/// What a recovery pass did.
 #[derive(Clone, Debug, Default)]
 pub struct RecoveryReport {
     pub total_records: usize,
     pub committed_txns: usize,
     pub redone: u64,
-    /// Loser transactions rolled back (rung 3).
     pub losers: usize,
-    /// Undo actions performed (CLRs written), rung 3.
     pub undone: u64,
 }
 
-/// Rung-1 recovery: analysis (find committed txns) then a single redo pass over
-/// their records, page-LSN guarded. Reconstructs committed state from the log.
 pub fn recover(
     data: Arc<dyn BlockFile>,
     log_file: Arc<dyn BlockFile>,
@@ -893,11 +758,8 @@ pub fn recover(
     Ok(report)
 }
 
-/// A closure that applies a record's redo to a page's raw bytes.
 type Applier = Box<dyn Fn(&mut [u8])>;
 
-/// Apply a single record's REDO to a page (repeat-history: winners and losers).
-/// Shared by `recover_aries`. Returns whether it applied.
 fn redo_record(bp: &BufferPool, r: &LogRecord) -> Result<bool> {
     let (page, apply): (PageId, Applier) = match &r.kind {
         Kind::PageInit { page, ptype } => {
@@ -953,11 +815,6 @@ fn redo_record(bp: &BufferPool, r: &LogRecord) -> Result<bool> {
     }
 }
 
-/// Full ARIES recovery (rung 3): Analysis → Redo (repeat history) → Undo
-/// (losers, with CLRs). Handles logs from any rung. Crash-safe against being
-/// interrupted itself: undo writes CLRs before the data is persisted, and a
-/// re-run repeats history (redoing the CLRs) and finds the now-ended losers, so
-/// running it any number of times converges to the same committed state.
 pub fn recover_aries(
     data: Arc<dyn BlockFile>,
     log_file: Arc<dyn BlockFile>,

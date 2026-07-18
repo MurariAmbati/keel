@@ -1,5 +1,3 @@
-//! SQL abstract syntax for the freeze set (D10).
-
 use keel_types::{ColumnType, Value};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -54,7 +52,6 @@ pub struct Delete {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Update {
     pub table: String,
-    /// `SET col = expr, ...` in source order.
     pub assignments: Vec<(String, Expr)>,
     pub filter: Option<Expr>,
 }
@@ -73,11 +70,8 @@ pub struct Select {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SelectItem {
-    /// `*`
     Wildcard,
-    /// `t.*`
     QualifiedWildcard(String),
-    /// `expr [AS alias]`
     Expr(Expr, Option<String>),
 }
 
@@ -172,7 +166,6 @@ pub enum Expr {
         whens: Vec<(Expr, Expr)>,
         els: Option<Box<Expr>>,
     },
-    /// An aggregate call; `arg == None` is `COUNT(*)`.
     Aggregate {
         func: AggFunc,
         arg: Option<Box<Expr>>,

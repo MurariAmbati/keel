@@ -1,20 +1,9 @@
-//! Regression for the flush-failure abort bug (found by adversarial review): when
-//! evicting a dirty victim, if the flush write itself fails (e.g. ENOSPC), the
-//! victim's changes are still only in memory. `abort_reservation` used to mark the
-//! frame CLEAN regardless, so a later `checkpoint` skipped it and the committed data
-//! was silently lost across a power loss even though every call returned Ok.
-//!
-//! Here a disk fails exactly one write — the flush during an eviction — and we check
-//! that the page stays dirty, so the next (successful) checkpoint persists it and it
-//! survives a reopen. Before the fix, the record is gone from disk.
-
 use keel_cbuffer::PageCache;
 use keel_vfs::{BlockFile, MemDisk};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-/// Wraps a `MemDisk` and fails the next `write_at` once armed.
 struct FailNextWrite {
     inner: MemDisk,
     armed: AtomicBool,

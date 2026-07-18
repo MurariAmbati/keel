@@ -1,14 +1,3 @@
-//! SQL redo crash campaign — DML through the logical WAL (the rung-1 analog at the
-//! query surface).
-//!
-//! In logged mode every mutating statement is appended to the redo log and fsynced
-//! *before* it is applied, and the data file is held under no-steal, so the log is
-//! the sole durable record. These tests pull the power and require that the
-//! committed statements are reconstructed **exactly** from the durable log onto an
-//! empty data disk — the SQL-level statement of the property the bank-accounts
-//! campaign proved physically — and that a torn (half-written) tail record is
-//! dropped atomically, never half-applied. Every failure replays from its `seed`.
-
 use std::sync::Arc;
 
 use keel_db::Database;
@@ -32,9 +21,6 @@ fn compare(db: &Database, mem: &mut MemDb, sql: &str, seed: u64) {
     assert_eq!(got.rows, want.rows, "seed {seed}: `{sql}`");
 }
 
-/// The committed statement stream is reconstructed from the durable log onto a
-/// fresh (empty) data disk, across a randomized workload including an index and a
-/// DROP-and-recreate.
 #[test]
 fn logged_recovery_reconstructs_committed_state() {
     for seed in 0..16u64 {
@@ -102,8 +88,6 @@ fn logged_recovery_reconstructs_committed_state() {
     }
 }
 
-/// A committed transaction is atomic across a crash: every statement in the
-/// `BEGIN … COMMIT` bracket survives, applied in order.
 #[test]
 fn transaction_commit_is_atomic_across_crash() {
     let log = Arc::new(MemDisk::new()) as Arc<dyn BlockFile>;
@@ -128,8 +112,6 @@ fn transaction_commit_is_atomic_across_crash() {
     assert_eq!(rs.rows[1][1], keel_types::Value::Int(20));
 }
 
-/// A rolled-back transaction leaves no trace; a crash before COMMIT is equivalent
-/// (its buffered statements were never logged).
 #[test]
 fn transaction_rollback_and_uncommitted_crash_leave_no_trace() {
     let log = Arc::new(MemDisk::new()) as Arc<dyn BlockFile>;
@@ -154,9 +136,6 @@ fn transaction_rollback_and_uncommitted_crash_leave_no_trace() {
     assert_eq!(rs.rows[0][0], keel_types::Value::Int(1));
 }
 
-/// Read-your-writes: a SELECT inside an open transaction sees the transaction's own
-/// buffered mutations; a SELECT *outside* it (before commit) does not; and the
-/// choice of COMMIT vs ROLLBACK decides what becomes visible afterward.
 #[test]
 fn transaction_read_your_writes() {
     let log = Arc::new(MemDisk::new()) as Arc<dyn BlockFile>;
@@ -195,8 +174,6 @@ fn transaction_read_your_writes() {
     assert_eq!(committed.rows[1][0], keel_types::Value::Int(3));
 }
 
-/// A crash *during* commit — the batch's statement records reached the log but the
-/// commit marker did not — discards the whole batch on recovery.
 #[test]
 fn crash_between_statements_and_commit_marker_discards_batch() {
     let log = Arc::new(MemDisk::new()) as Arc<dyn BlockFile>;
@@ -223,7 +200,6 @@ fn crash_between_statements_and_commit_marker_discards_batch() {
     assert_eq!(rs.rows[0][0], keel_types::Value::Int(1));
 }
 
-/// Build a StmtLog frame `[MAGIC][len][crc32(payload)][payload]`.
 fn raw_frame(payload: &[u8]) -> Vec<u8> {
     let mut f = Vec::new();
     f.extend_from_slice(&LOG_MAGIC.to_le_bytes());
@@ -233,9 +209,6 @@ fn raw_frame(payload: &[u8]) -> Vec<u8> {
     f
 }
 
-/// Log compaction bounds recovery: after `compact`, reopening replays only the
-/// snapshot + post-compact tail (not the whole history), reconstructs the exact
-/// state, and survives a crash after the compaction.
 #[test]
 fn compaction_bounds_recovery_and_preserves_state() {
     let log = Arc::new(MemDisk::new()) as Arc<dyn BlockFile>;
@@ -276,10 +249,6 @@ fn compaction_bounds_recovery_and_preserves_state() {
     );
 }
 
-/// Every value type and its edge cases must survive a compaction round-trip — the
-/// snapshot emits each row as an `INSERT` literal (`value_to_sql`), so a mistake in
-/// formatting a negative double, an i32 boundary, an embedded quote, an empty
-/// string, or a NULL would corrupt the reconstructed state.
 #[test]
 fn compaction_round_trips_all_value_types() {
     use keel_types::Value;
@@ -339,12 +308,6 @@ fn compaction_round_trips_all_value_types() {
     }
 }
 
-/// Randomized compaction round-trip: for each seed, load a table of random values
-/// of every type (arbitrary i32/i64, arbitrary f64, text with quotes and specials,
-/// NULLs, bools), compact, reopen, and compare the reconstructed state to a `MemDb`
-/// oracle fed the identical INSERTs. This fuzzes `value_to_sql` far past the
-/// hand-picked edge cases: any value that fails to round-trip through the snapshot's
-/// SQL-literal form diverges from the oracle.
 #[test]
 fn compaction_round_trip_random_values_vs_oracle() {
     for seed in 0..25u64 {
@@ -400,9 +363,6 @@ fn compaction_round_trip_random_values_vs_oracle() {
     }
 }
 
-/// A crash *during* compaction (the begin marker and part of the snapshot reached
-/// the log, but the closing end marker did not) is ignored on recovery: the prior
-/// history still reconstructs the correct state.
 #[test]
 fn torn_compaction_is_ignored() {
     let log = Arc::new(MemDisk::new()) as Arc<dyn BlockFile>;
@@ -435,9 +395,6 @@ fn torn_compaction_is_ignored() {
     );
 }
 
-/// A statement whose log frame is torn (a crash mid-append, before fsync returns)
-/// is dropped whole on recovery — never half-applied. We simulate the torn tail by
-/// writing a partial frame after the committed records.
 #[test]
 fn torn_log_tail_is_dropped_atomically() {
     let log = Arc::new(MemDisk::new()) as Arc<dyn BlockFile>;

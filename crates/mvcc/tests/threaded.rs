@@ -1,16 +1,3 @@
-//! The MVCC store under **real threads** (P7/P8, §5.2) — the exhaustive visibility
-//! matrix proves the rule in isolation; this proves **first-updater-wins** actually
-//! prevents lost updates when many OS threads race on the same rows.
-//!
-//! A bank of accounts lives in a single `Mutex<MvccStore>`. Threads run random
-//! transfers as MVCC transactions: read both balances from the transaction's
-//! snapshot, write the new balances, commit. When two transactions race on a shared
-//! account, first-updater-wins aborts the second at its `update` (`WriteConflict`),
-//! and it retries against a fresh snapshot — so a stale-read overwrite (a lost
-//! update) can never commit. If the rule were wrong, money would leak; the test
-//! asserts the total is conserved exactly, and counts the conflicts so we know the
-//! race actually happened (not a serialized fluke).
-
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -39,15 +26,6 @@ impl Bank {
         })
     }
 
-    /// One transfer as an MVCC transaction, retried until it commits. A
-    /// `WriteConflict` on either `update` means another transaction beat us to a
-    /// shared row (first-updater-wins) — abort and retry against a fresh snapshot.
-    ///
-    /// The two writes are applied in **row-index order** (the lower account first),
-    /// independent of transfer direction. Without that, two transfers touching the
-    /// same pair in opposite directions each grab one row then conflict on the
-    /// other, both abort, and livelock; updating the lower row first makes conflicts
-    /// serialize on that row so exactly one makes progress at a time.
     fn transfer(&self, from: usize, to: usize, amt: i64) {
         let lo = from.min(to);
         let hi = from.max(to);
@@ -95,8 +73,6 @@ impl Bank {
         panic!("transfer never committed within the attempt cap (livelock?)");
     }
 
-    /// Abort a conflicted transaction, count it, and back off briefly (bounded) to
-    /// let the winner drain — keeps a hot pair from thrashing.
     fn retry(&self, txn: keel_mvcc::Txn, attempt: usize) {
         self.conflicts.fetch_add(1, Ordering::Relaxed);
         self.store.lock().unwrap().abort(txn);
@@ -105,7 +81,6 @@ impl Bank {
         }
     }
 
-    /// Sum every account's latest committed value under a fresh snapshot.
     fn total(&self) -> i64 {
         let mut store = self.store.lock().unwrap();
         let txn = store.begin();

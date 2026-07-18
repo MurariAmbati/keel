@@ -1,12 +1,3 @@
-//! `keel-bench` — the tuple-vs-vector ablation (§9), self-contained.
-//!
-//! The single most instructive performance event in the compendium: the same
-//! filter run row-at-a-time (per-tuple dispatch through `eval_public`) versus
-//! vectorized (batch-at-a-time through `vexec`). The two engines are the same
-//! ones the differential campaign proves agree, so this measures *only*
-//! architecture, on identical data. "Your number will be yours" — it prints the
-//! throughput of each and the speedup, N medians ± MAD (§8.3 discipline).
-
 use std::time::Instant;
 
 use keel_rng::Rng;
@@ -100,7 +91,6 @@ fn main() {
     println!("\nNote: KEEL's Value is a tagged enum, so this understates a true\ncolumnar engine (native arrays, SIMD); it isolates the dispatch-\namortization effect only — the honest, in-scope part of §9.");
 }
 
-/// Median and median-absolute-deviation of a sample (§8.3: robust central stats).
 fn median_mad(xs: &mut [f64]) -> (f64, f64) {
     xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let med = xs[xs.len() / 2];

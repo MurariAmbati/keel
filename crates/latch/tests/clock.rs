@@ -1,12 +1,3 @@
-//! Race oracle for the concurrent CLOCK page cache (D-LATCH `ClockPool`).
-//!
-//! This is the whole protocol under load: more distinct pages than frames, so
-//! threads continuously evict one another's *unpinned* pages, while the invariant
-//! is that a *pinned* page is never evicted. Each thread reads every page it
-//! acquires and checks the value equals the id — so any race between victim
-//! selection and pinning (a frame reloaded with a different page while pinned)
-//! shows up as a mismatched value, not as silent corruption.
-
 use keel_latch::ClockPool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

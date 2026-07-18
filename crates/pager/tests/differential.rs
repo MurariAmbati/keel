@@ -1,18 +1,3 @@
-//! Pager differential: the same generic workload driven through the
-//! single-threaded `BufferPool` and the concurrent `PageCache` must produce
-//! byte-identical results.
-//!
-//! This is what de-risks the rest of the engine swap. Rather than converting
-//! `heap`/`btree` and hoping the two pools agree, the seam itself is held to the
-//! established oracle discipline: one workload, two implementations, compared. Any
-//! behavioural divergence (page numbering, allocation, eviction, checksum handling,
-//! what a reopened pool sees) surfaces here — in a 60-line test — instead of inside
-//! a B-tree split at slice 4.
-//!
-//! Note the workload never stamps a checksum: both pools guarantee it centrally, so
-//! agreeing here also confirms `cbuffer`'s new `PageFormat` matches `keel-buffer`'s
-//! long-standing behaviour.
-
 use keel_buffer::BufferPool;
 use keel_cbuffer::{NoWal, PageCache, PageFormat};
 use keel_page::{raw, PageType, SlottedPage};
@@ -24,15 +9,8 @@ const FRAMES: usize = 3;
 const PAGES: u32 = 6;
 const PER_PAGE: u32 = 4;
 
-/// A summary of everything observable through the seam.
 type Summary = Vec<(u32, Option<u8>, Vec<Vec<u8>>)>;
 
-/// The slotted header a *freshly allocated* page must present, captured before any
-/// insert touches it. This matters: `SlottedPage::insert` calls `compact()` when
-/// space looks short, and compacting a page with no live tuples *repairs* a
-/// zero-initialised header into a valid empty one. So a pool that mis-initialises a
-/// page is invisible once records are written — the divergence self-heals. Sampling
-/// at allocation is what makes this differential able to see it.
 type FreshHeaders = Vec<(u16, u16, u16)>;
 
 fn exercise<P: Pager>(p: &P) -> Result<(Summary, FreshHeaders), PagerError> {

@@ -1,13 +1,3 @@
-//! Streaming aggregation differential — GROUP BY / HAVING and the five aggregates
-//! run through the streaming aggregate path must match the reference oracle.
-//!
-//! The streaming executor now groups and reduces aggregates itself (only the
-//! scalar/3-valued evaluation is shared via `eval_public`), so this pins that new
-//! logic against the materializing reference engine across random data with NULLs,
-//! DISTINCT aggregates, HAVING, and aggregate arithmetic. An `agg_streams`
-//! assertion proves the streaming aggregate path — not the fallback — served the
-//! queries. Every failure replays from its `seed`.
-
 use std::sync::Arc;
 
 use keel_db::Database;

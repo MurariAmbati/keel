@@ -1,16 +1,3 @@
-//! The B-tree runs on the **concurrent** page cache (engine-swap slice 4).
-//!
-//! `BTree` is now generic over `keel_pager::Pager`, defaulting to `BufferPool` so
-//! every existing call site — including the whole `db` engine — compiles untouched.
-//! This test is the evidence the generification is real rather than cosmetic: the
-//! *same* B-tree code is driven over `cbuffer::PageCache` and over `BufferPool`, and
-//! the two must agree exactly.
-//!
-//! It is a differential at the data-structure level, one rung above the pager-level
-//! differential in `keel-pager`. A divergence in eviction, allocation, checksum
-//! handling, or reopen semantics that survived the pager comparison would show up
-//! here as a wrong lookup, a lost key, or a failed invariant check.
-
 use keel_btree::BTree;
 use keel_buffer::BufferPool;
 use keel_cbuffer::{NoWal, PageCache, PageFormat};
@@ -29,11 +16,6 @@ fn key_for(i: u64) -> Vec<u8> {
     encode_value(ColumnType::BigInt, &Value::BigInt(i as i64))
 }
 
-/// Build a tree, insert a shuffled key set, delete a slice of it, and report
-/// everything observable: the full ordered scan, a range, point lookups, and the
-/// invariant-checker's tallies.
-/// Everything the workload observes: the full ordered scan, a range scan, a vector
-/// of point-lookup hits, and the invariant checker's (leaves, entries) tally.
 type Observed = (
     Vec<(Vec<u8>, u64)>,
     Vec<(Vec<u8>, u64)>,

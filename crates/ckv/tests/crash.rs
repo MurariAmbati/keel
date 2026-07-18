@@ -1,26 +1,7 @@
-//! Crash campaign: the KV's checkpoint is a hard barrier, and torn buckets are
-//! never read as valid data.
-//!
-//! Each seed checkpoints every key at a base value, then rewrites every key to a
-//! newer value *without* checkpointing, through a small cache so the newer writes
-//! steal-and-evict into the un-synced pending set. A vicious crash then drops,
-//! tears, and reorders that pending set. On reopen from the durable image, the
-//! honest guarantee `cbuffer` + the KV provide *without* a redo/undo layer is:
-//!
-//! * every **intact** bucket (CRC valid) holds only base-or-newer values — never
-//!   an older, torn, or garbage value; and
-//! * a torn bucket is **detected** by its checksum, not silently returned.
-//!
-//! Redo/undo of the un-checkpointed work is the WAL/`recover_aries` layer's job,
-//! which a real engine composes on top — deliberately out of scope here.
-
 use keel_ckv::{KvError, PagedKv};
 use keel_faultfs::{FaultConfig, FaultDisk};
 use std::sync::Arc;
 
-/// Mirrors `PagedKv::bucket_of` so the test can assert a returned key actually
-/// belongs to the bucket it came out of — catching a whole-page image of a
-/// *different* bucket, which carries a perfectly valid checksum of its own.
 fn self_bucket_of(k: u64, buckets: u32) -> u32 {
     (k.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as u32 % buckets
 }
@@ -28,12 +9,6 @@ fn self_bucket_of(k: u64, buckets: u32) -> u32 {
 const BUCKETS: u32 = 8;
 const FRAMES: usize = 3;
 const KEYS: u64 = 120;
-/// Round 2 also *adds* keys, so a bucket's entry COUNT differs between the two
-/// versions. That is what makes this test falsifiable: with the count changing, a
-/// torn page can pair one version's header with the other's entry array, yielding
-/// out-of-range keys that only the checksum can catch. If both rounds wrote the
-/// same count (as this test originally did), tearing produced no observable
-/// inconsistency and the test passed even with checksum verification removed.
 const EXTRA: u64 = 40;
 const BASE: u64 = 1_000;
 const NEWER: u64 = 2_000;

@@ -1,41 +1,16 @@
-//! KEEL's value system and tuple (record) codec.
-//!
-//! The freeze-set scalar types (D10): `bigint, int, double, varchar(n), bool`,
-//! plus SQL's ever-present `NULL`. A [`Value`] is one datum; a [`Schema`]
-//! describes a row's columns; [`encode_record`]/[`decode_record`] serialize a
-//! row to the bytes a heap tuple holds.
-//!
-//! Record layout (a deliberately simple, obviously-correct encoding for P1):
-//! ```text
-//! [ null bitmap: ceil(ncols/8) bytes ]
-//! [ for each NON-NULL column, in column order:
-//!     bool     -> 1 byte
-//!     int      -> 4 bytes LE
-//!     bigint   -> 8 bytes LE
-//!     double   -> 8 bytes (IEEE bits) LE
-//!     varchar  -> u16 length LE, then the UTF-8 bytes ]
-//! ```
-//! The offset-table layout the design sketches (fixed fields packed, varlen in a
-//! trailing section) is a later space optimization; this one is chosen so the
-//! codec is easy to prove right, and it is fuzzed against a model in the heap
-//! crate.
-
 use std::cmp::Ordering;
 use std::fmt;
 
-/// A scalar column type from the freeze set (D10).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColumnType {
     Bool,
     Int,
     BigInt,
     Double,
-    /// `varchar(n)` — `n` is the max length in bytes (enforced at bind time).
     Varchar(u16),
 }
 
 impl ColumnType {
-    /// Fixed on-disk width, or `None` for variable-length types.
     pub fn fixed_width(self) -> Option<usize> {
         match self {
             ColumnType::Bool => Some(1),
@@ -57,8 +32,6 @@ impl ColumnType {
     }
 }
 
-/// A single datum. `Null` is a first-class value; three-valued logic lives in
-/// the SQL layers, not here (this type just carries the absence).
 #[derive(Clone, Debug)]
 pub enum Value {
     Null,
@@ -74,8 +47,6 @@ impl Value {
         matches!(self, Value::Null)
     }
 
-    /// The column type this value belongs to, or `None` for `Null` (which is
-    /// type-compatible with any column).
     pub fn type_of(&self) -> Option<ColumnType> {
         Some(match self {
             Value::Null => return None,
@@ -87,8 +58,6 @@ impl Value {
         })
     }
 
-    /// Whether this value is storable in a column of type `ty` (ignoring NULL,
-    /// which the null bitmap handles).
     pub fn fits(&self, ty: ColumnType) -> bool {
         match (self, ty) {
             (Value::Null, _) => true,
@@ -102,9 +71,6 @@ impl Value {
     }
 }
 
-/// IEEE-754 total order key: maps an `f64` to a `u64` that sorts numerically,
-/// with `-0.0 < 0.0` and NaN at the high end. Used both for `Value` ordering and
-/// for the normalized-key double encoding (keeps the two in lockstep).
 pub fn f64_total_order_bits(x: f64) -> u64 {
     let bits = x.to_bits();
     if bits & 0x8000_0000_0000_0000 != 0 {
@@ -132,9 +98,6 @@ impl Ord for Value {
 }
 
 impl Value {
-    /// A total order over values. `Null` sorts below everything (matching the
-    /// key codec's NULL-low convention); doubles use IEEE total order. Mixed
-    /// types compare by a stable type rank so collections stay well-ordered.
     pub fn total_cmp(&self, other: &Value) -> Ordering {
         fn rank(v: &Value) -> u8 {
             match v {
@@ -173,7 +136,6 @@ impl fmt::Display for Value {
     }
 }
 
-/// A column definition: name, type, and nullability (D10 `NOT NULL`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnDef {
     pub name: String,
@@ -191,7 +153,6 @@ impl ColumnDef {
     }
 }
 
-/// A row shape: an ordered list of columns.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Schema {
     pub columns: Vec<ColumnDef>,
@@ -214,18 +175,12 @@ impl Schema {
     }
 }
 
-/// Errors from record encoding/decoding.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecordError {
-    /// The row's arity doesn't match the schema.
     Arity { expected: usize, got: usize },
-    /// A value doesn't fit its declared column type.
     TypeMismatch { column: usize },
-    /// A NULL was supplied for a `NOT NULL` column.
     NullViolation { column: usize },
-    /// A varchar exceeded its declared max length.
     TooLong { column: usize },
-    /// The bytes ran out or were malformed while decoding.
     Truncated,
 }
 
@@ -248,7 +203,6 @@ fn bitmap_len(ncols: usize) -> usize {
     ncols.div_ceil(8)
 }
 
-/// Encode a row to tuple bytes, validating against the schema.
 pub fn encode_record(schema: &Schema, row: &[Value]) -> Result<Vec<u8>, RecordError> {
     if row.len() != schema.columns.len() {
         return Err(RecordError::Arity {
@@ -289,7 +243,6 @@ pub fn encode_record(schema: &Schema, row: &[Value]) -> Result<Vec<u8>, RecordEr
     Ok(out)
 }
 
-/// Decode tuple bytes back into a row, using the schema to know field widths.
 pub fn decode_record(schema: &Schema, bytes: &[u8]) -> Result<Vec<Value>, RecordError> {
     let nb = bitmap_len(schema.columns.len());
     if bytes.len() < nb {

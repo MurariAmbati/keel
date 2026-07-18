@@ -1,13 +1,3 @@
-//! `keel-qbench` — an end-to-end query benchmark over the durable engine (§8).
-//!
-//! Where `keel-bench` isolates one architectural effect (tuple vs vector), this
-//! measures the assembled thing a user actually runs: SQL over a heap through the
-//! buffer pool, with a real B-tree index and the streaming executors. It loads two
-//! related tables, then times three representative shapes — a filtered full scan,
-//! an indexed point lookup, and a hash join — reporting rows/s and median ± MAD
-//! latency (§8.3). These are KEEL's own numbers; a head-to-head against SQLite and
-//! DuckDB (the "credible TPC-H fight") is the next benchmarking step, not this one.
-
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -79,7 +69,6 @@ fn main() {
     println!("hash-join queries served:   {}", db.join_streams());
 }
 
-/// Insert `count` rows into `table` in batches of `batch` rows per statement.
 fn bulk_insert(
     db: &Database,
     table: &str,

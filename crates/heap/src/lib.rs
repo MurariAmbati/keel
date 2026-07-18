@@ -1,26 +1,3 @@
-//! The heap — tuples in slotted pages, addressed by RID (D8, §2.2).
-//!
-//! Tuples live in heap pages; a `RID = (page, slot)` is a tuple's permanent
-//! address. Because indexes (and, later, the client) hold RIDs, a RID must stay
-//! valid even when an update grows a tuple past its page. The classic answer,
-//! taken here: leave a **forwarding stub** at the old slot pointing to the new
-//! location, so no index needs touching on a move (§2.2). A stat counter tracks
-//! forward-chain hops — because that counter turning up in a later profile is
-//! the whole reason real systems obsess over HOT-style optimizations.
-//!
-//! Chains are held to length one by construction: a stub always points at a real
-//! tuple, never at another stub. If a forwarded tuple must move again, the *stub*
-//! is repointed and the intermediate deleted, so reads follow at most one hop.
-//!
-//! Each heap record is a tagged byte string: a one-byte tag then the payload.
-//! * `Tuple` — a normal, directly-addressed tuple.
-//! * `Forward` — a stub; payload is the 6-byte target RID.
-//! * `ForwardTarget` — the moved tuple a stub points at; skipped by scans so
-//!   every logical tuple is yielded exactly once.
-//!
-//! A free-space map (one entry per page, rebuilt on open — advisory, §2.1) lets
-//! inserts find a page with room without scanning the whole file.
-
 use std::cell::{Cell, RefCell};
 
 use keel_buffer::{BufferError, BufferPool, PageId};
@@ -34,11 +11,8 @@ const TAG_FORWARD_TARGET: u8 = 2;
 const RID_BYTES: usize = 6;
 const TAG_BYTES: usize = 1;
 
-/// The largest user record the heap stores inline (one byte reserved for the
-/// tag). Larger values need overflow pages, deferred by D10's `varchar(n)` cap.
 pub const MAX_RECORD: usize = MAX_TUPLE_SIZE - TAG_BYTES;
 
-/// The three kinds of heap record, for offline tools (`dbcheck`, `pageview`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecordKind {
     Tuple,
@@ -46,8 +20,6 @@ pub enum RecordKind {
     ForwardTarget,
 }
 
-/// Classify a raw heap record by its tag byte. `Err(tag)` on an unknown/empty
-/// record — used by the offline validators to flag corruption.
 pub fn classify_record(bytes: &[u8]) -> std::result::Result<RecordKind, u8> {
     match bytes.first() {
         Some(&TAG_TUPLE) => Ok(RecordKind::Tuple),
@@ -60,7 +32,6 @@ pub fn classify_record(bytes: &[u8]) -> std::result::Result<RecordKind, u8> {
     }
 }
 
-/// A record identifier: a page number and a stable slot within it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Rid {
     pub page: PageId,
@@ -85,32 +56,23 @@ impl Rid {
     }
 }
 
-/// Heap counters — every stat before every explanation (house law).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HeapStats {
     pub inserts: u64,
     pub gets: u64,
     pub updates: u64,
     pub deletes: u64,
-    /// Times a read had to chase a forwarding stub.
     pub forward_hops: u64,
-    /// Times an update created a new forwarding stub.
     pub forwards_created: u64,
     pub new_pages: u64,
 }
 
-/// Errors from heap operations.
 #[derive(Debug)]
 pub enum HeapError {
     Buffer(BufferError),
-    /// Record exceeds what fits in a page (overflow pages are deferred).
     RecordTooLarge,
-    /// A forwarding stub pointed at a missing/invalid target.
     DanglingForward(Rid),
-    /// A tagged record had an unrecognized tag.
     BadTag(u8),
-    /// A forward stub could not be placed even after compaction (rare corner:
-    /// a sub-6-byte tuple on an otherwise-packed page). The old value is intact.
     ForwardWontFit(Rid),
 }
 
@@ -131,8 +93,6 @@ impl From<BufferError> for HeapError {
         HeapError::Buffer(e)
     }
 }
-/// The pager seam reports the same three failures under a different name; fold them
-/// into the existing variant so the public error type is unchanged by the migration.
 impl From<keel_pager::PagerError> for HeapError {
     fn from(e: keel_pager::PagerError) -> Self {
         HeapError::Buffer(match e {
@@ -145,20 +105,14 @@ impl From<keel_pager::PagerError> for HeapError {
 
 pub type Result<T> = std::result::Result<T, HeapError>;
 
-/// A heap over a buffer pool. Borrows the pool; all methods take `&self`.
 pub struct HeapFile<'a, P: Pager = BufferPool> {
     bp: &'a P,
-    /// Free-space map: compactable free bytes per page. Advisory, rebuilt on
-    /// open, updated after every mutation.
     fsm: RefCell<Vec<u16>>,
-    /// Round-robin start for the first-fit search, so inserts spread out.
     cursor: Cell<usize>,
     stats: Cell<HeapStats>,
 }
 
 impl<'a, P: Pager> HeapFile<'a, P> {
-    /// Open over an existing pool, rebuilding the free-space map by scanning
-    /// every heap page.
     pub fn open(bp: &'a P) -> Result<Self> {
         let n = Pager::page_count(bp);
         let mut fsm = Vec::with_capacity(n as usize);
@@ -199,8 +153,6 @@ impl<'a, P: Pager> HeapFile<'a, P> {
         fsm[pid as usize] = free.min(u16::MAX as usize) as u16;
     }
 
-    /// First-fit search for a page whose compactable free covers `need` plus a
-    /// slot's worth of overhead. `None` means allocate a fresh page.
     fn pick_page(&self, need: usize) -> Option<PageId> {
         let want = need + keel_page::SLOT_SIZE;
         let fsm = self.fsm.borrow();
@@ -283,9 +235,6 @@ impl<'a, P: Pager> HeapFile<'a, P> {
         Ok(existed)
     }
 
-    /// Set the contents of an existing self-contained slot (Tuple or
-    /// ForwardTarget), keeping its tag. Returns `Ok(true)` if it fit in place or
-    /// after compaction, `Ok(false)` if the page is full (old value intact).
     fn set_slot(&self, rid: Rid, tag: u8, record: &[u8]) -> Result<bool> {
         let mut buf = Vec::with_capacity(TAG_BYTES + record.len());
         buf.push(tag);
@@ -327,7 +276,6 @@ impl<'a, P: Pager> HeapFile<'a, P> {
         }
     }
 
-    /// Insert a record, returning its permanent RID.
     pub fn insert(&self, record: &[u8]) -> Result<Rid> {
         if record.len() > MAX_RECORD {
             return Err(HeapError::RecordTooLarge);
@@ -336,7 +284,6 @@ impl<'a, P: Pager> HeapFile<'a, P> {
         self.insert_tagged(TAG_TUPLE, record)
     }
 
-    /// Fetch a record by RID, following a forwarding stub if present.
     pub fn get(&self, rid: Rid) -> Result<Option<Vec<u8>>> {
         self.bump(|s| s.gets += 1);
         let (tag, payload) = match self.read_slot(rid)? {
@@ -358,7 +305,6 @@ impl<'a, P: Pager> HeapFile<'a, P> {
         }
     }
 
-    /// Delete a record by RID (and its forward target, if any).
     pub fn delete(&self, rid: Rid) -> Result<bool> {
         self.bump(|s| s.deletes += 1);
         let (tag, payload) = match self.read_slot(rid)? {
@@ -381,8 +327,6 @@ impl<'a, P: Pager> HeapFile<'a, P> {
         }
     }
 
-    /// Update a record by RID. Grows in place if possible; otherwise forwards,
-    /// keeping forward chains at length one. Returns whether the RID existed.
     pub fn update(&self, rid: Rid, record: &[u8]) -> Result<bool> {
         if record.len() > MAX_RECORD {
             return Err(HeapError::RecordTooLarge);
@@ -422,9 +366,6 @@ impl<'a, P: Pager> HeapFile<'a, P> {
         }
     }
 
-    /// Full heap scan: every logical tuple exactly once, as `(rid, record)`.
-    /// Forward stubs are resolved to their target's bytes but reported under the
-    /// stub's (stable) RID; forward targets are skipped.
     pub fn scan(&self) -> Result<Vec<(Rid, Vec<u8>)>> {
         let mut out = Vec::new();
         for pid in 0..Pager::page_count(self.bp) {

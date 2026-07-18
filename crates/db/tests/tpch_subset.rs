@@ -1,14 +1,3 @@
-//! A TPC-H-shaped analytical subset (§8) — the "credible TPC-H fight", correctness
-//! half. KEEL now has everything the classic queries need — multi-way hash joins
-//! with cost-based ordering, hash aggregation, GROUP BY / HAVING, ORDER BY / LIMIT
-//! — so this runs Q1-, Q3-, and Q6-flavored queries over a synthetic TPC-H-lite
-//! dataset and checks each result against the reference oracle. Integer surrogates
-//! stand in for TPC-H's decimals so sums are order-independent and the differential
-//! is exact. Counters assert the streaming join and aggregate paths actually served
-//! the queries (not the materializing fallback). The head-to-head timing against
-//! SQLite / DuckDB is the remaining half — it needs those engines installed, which
-//! this environment lacks.
-
 use std::sync::Arc;
 
 use keel_db::Database;

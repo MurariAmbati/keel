@@ -1,13 +1,3 @@
-//! Differential oracle: a random insert / get / delete / scan sequence against a
-//! `HashMap<Rid, Vec<u8>>` model, through a deliberately tiny cache so pages
-//! constantly evict and reload. After every operation the heap must agree with the
-//! model; every so often the full `scan()` must equal the model exactly.
-//!
-//! Slot reuse (an insert reclaiming a tombstoned slot) means a fresh insert can
-//! return a RID equal to a previously deleted one — the model keyed by RID stays
-//! consistent because the old occupant was removed first, so this also exercises
-//! that recycling path.
-
 use keel_cheap::{Heap, Rid};
 use keel_page::PAGE_SIZE;
 use keel_rng::Rng;

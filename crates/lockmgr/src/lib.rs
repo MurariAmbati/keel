@@ -1,44 +1,19 @@
-//! The lock manager — strict two-phase locking with deadlock detection (§5.1,
-//! D6 lane T1).
-//!
-//! This is the lane that exercises ARIES undo for real: aborts must physically
-//! roll back, and 2PL is the schedule discipline that produces them. It is a
-//! hierarchical lock table over resources (a table, a row) in modes
-//! `{IS, IX, S, SIX, X}` with the standard compatibility matrix, grant/wait
-//! queues, and a **waits-for cycle detector** that names a youngest victim when a
-//! deadlock forms. Strict 2PL: every lock is held to commit/abort, then released
-//! together (`release_all`).
-//!
-//! It is built and tested single-threaded first (D3): scripted lock schedules
-//! prove the compatibility matrix, the wait behavior, upgrades, and — the point —
-//! deadlock detection, before any thread touches it. Running it under real
-//! latching is the next phase.
-
 use std::collections::{HashMap, HashSet};
 
-/// A transaction id. Younger transactions have larger ids (used for victim
-/// selection).
 pub type TxnId = u64;
 
-/// A lockable resource: a table (intention locks) or a specific row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Resource {
     Table(u32),
     Row(u32, u64),
 }
 
-/// Lock modes, weakest to strongest for intention purposes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// Intention-shared.
     IS,
-    /// Intention-exclusive.
     IX,
-    /// Shared.
     S,
-    /// Shared + intention-exclusive.
     SIX,
-    /// Exclusive.
     X,
 }
 
@@ -53,8 +28,6 @@ impl Mode {
         }
     }
 
-    /// Are two already-held modes compatible? (The standard multi-granularity
-    /// matrix; rows/cols in IS, IX, S, SIX, X order.)
     pub fn compatible(self, other: Mode) -> bool {
         const M: [[bool; 5]; 5] = [
             [true, true, true, true, false],
@@ -67,15 +40,10 @@ impl Mode {
     }
 }
 
-/// The outcome of a lock request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Grant {
-    /// The lock is now held.
     Granted,
-    /// Incompatible with a current holder — the caller would block (the request
-    /// is queued).
     Waiting,
-    /// Granting the wait would create a cycle; abort `victim` to break it.
     Deadlock { victim: TxnId },
 }
 
@@ -85,12 +53,9 @@ struct Entry {
     waiting: Vec<(TxnId, Mode)>,
 }
 
-/// The lock table. A single shard here; production shards by resource hash (§5.1)
-/// — the interface is identical.
 #[derive(Default)]
 pub struct LockManager {
     table: HashMap<Resource, Entry>,
-    /// waits_for[t] = the set of transactions `t` is blocked behind.
     waits_for: HashMap<TxnId, HashSet<TxnId>>,
 }
 
@@ -99,11 +64,6 @@ impl LockManager {
         Self::default()
     }
 
-    /// Request `mode` on `res` for `txn` under strict 2PL. Grants immediately if
-    /// compatible with all *other* holders; otherwise queues the request and
-    /// records waits-for edges, returning `Waiting` — unless doing so closes a
-    /// cycle, in which case `Deadlock{victim}` (the youngest transaction in the
-    /// cycle) and no edge is added.
     pub fn lock(&mut self, txn: TxnId, res: Resource, mode: Mode) -> Grant {
         let entry = self.table.entry(res).or_default();
 
@@ -142,8 +102,6 @@ impl LockManager {
         Grant::Waiting
     }
 
-    /// Release every lock held or waited-for by `txn` (strict 2PL: at
-    /// commit/abort), then grant any now-satisfiable waiters.
     pub fn release_all(&mut self, txn: TxnId) {
         self.waits_for.remove(&txn);
         for edges in self.waits_for.values_mut() {
@@ -161,8 +119,6 @@ impl LockManager {
         }
     }
 
-    /// Grant any waiters on `res` now compatible with the granted set (FIFO, so
-    /// the queue can't starve a request behind a long-lived incompatible one).
     fn promote_waiters(&mut self, res: Resource) {
         loop {
             let entry = match self.table.get(&res) {
@@ -183,9 +139,6 @@ impl LockManager {
         }
     }
 
-    /// Would adding `txn -> wait_on` edges create a cycle in the waits-for graph?
-    /// If so, return the youngest transaction (largest id) on the cycle as the
-    /// victim.
     fn would_deadlock(&self, txn: TxnId, wait_on: &HashSet<TxnId>) -> Option<TxnId> {
         for &start in wait_on {
             let mut stack = vec![start];
@@ -210,7 +163,6 @@ impl LockManager {
         None
     }
 
-    /// Debug: current holders of a resource.
     pub fn holders(&self, res: Resource) -> Vec<(TxnId, Mode)> {
         self.table
             .get(&res)

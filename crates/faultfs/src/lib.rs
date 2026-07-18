@@ -1,46 +1,17 @@
-//! The fault-injecting file layer — the crash campaign's adversary (§7.3).
-//!
-//! `FaultDisk` implements [`keel_vfs::BlockFile`], so from the engine's side it
-//! is indistinguishable from a real disk. Underneath it models the *honest*
-//! disk of the ALICE work (Pillai et al., OSDI'14):
-//!
-//!   * a write becomes durable only after a following `sync`;
-//!   * between two syncs, un-synced writes may be reordered arbitrarily;
-//!   * across a sync there is no reordering (durability is a barrier);
-//!   * on a crash, an un-synced write may land fully, partially (torn at
-//!     512-byte sector boundaries), or not at all.
-//!
-//! Every fault decision is drawn from a seeded [`keel_rng::Rng`], so a failure
-//! is fully described by `(disk seed, crash schedule)` and replays byte-for-byte
-//! — the deterministic-simulation ethos the whole campaign rests on.
-//!
-//! The *timing* of a crash (after which write, at which fsync boundary, and how
-//! deep into recovery) is the harness's job: it drives the workload and calls
-//! [`FaultDisk::crash`] at the scheduled point. This layer owns only the disk
-//! semantics, never the control flow.
-
 use std::io::{self, ErrorKind};
 use std::sync::{Arc, Mutex};
 
 use keel_rng::Rng;
 use keel_vfs::BlockFile;
 
-/// Disk sector size. A torn write persists a subset of the sectors it touched.
 pub const SECTOR: usize = 512;
 
-/// Tunables for the disk's failure behavior. Probabilities apply *per un-synced
-/// write* at crash time.
 #[derive(Clone, Copy, Debug)]
 pub struct FaultConfig {
-    /// P(an un-synced write is entirely lost on crash).
     pub p_drop: f64,
-    /// P(an un-synced write is torn rather than applied whole).
     pub p_tear: f64,
-    /// Within a torn write, P(each touched sector survives).
     pub p_sector_survives: f64,
-    /// Whether un-synced writes may be reordered before the crash resolves them.
     pub reorder: bool,
-    /// Sector size for tearing.
     pub sector: usize,
 }
 
@@ -57,8 +28,6 @@ impl Default for FaultConfig {
 }
 
 impl FaultConfig {
-    /// A benign config: writes are never dropped or torn. Useful to isolate a
-    /// bug to "recovery logic" vs "the injector".
     pub fn benign() -> Self {
         Self {
             p_drop: 0.0,
@@ -76,20 +45,16 @@ struct WriteOp {
     data: Vec<u8>,
 }
 
-/// What a single crash did — folded into the campaign's stats.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CrashReport {
     pub pending_ops: usize,
     pub fully_applied: usize,
     pub torn: usize,
     pub dropped: usize,
-    /// Sectors that survived within torn writes.
     pub torn_sectors_kept: usize,
-    /// Sectors that vanished within torn writes.
     pub torn_sectors_lost: usize,
 }
 
-/// Cumulative counters — every stat before every explanation (house law).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Counters {
     pub reads: u64,
@@ -101,26 +66,20 @@ pub struct Counters {
 }
 
 struct State {
-    /// Bytes as of the last successful `sync` — guaranteed to survive a crash.
     durable: Vec<u8>,
-    /// What the running process sees: durable plus every write since.
     live: Vec<u8>,
-    /// Un-synced writes, in issue order — the reorder/tear candidates.
     pending: Vec<WriteOp>,
     cfg: FaultConfig,
     rng: Rng,
     counters: Counters,
 }
 
-/// A fault-injecting durable medium. Clone handles share the same disk (so it
-/// models "the disk survives, the process does not").
 #[derive(Clone)]
 pub struct FaultDisk {
     st: Arc<Mutex<State>>,
 }
 
 impl FaultDisk {
-    /// Fresh empty disk with the given fault config and seed.
     pub fn new(cfg: FaultConfig, seed: u64) -> Self {
         Self {
             st: Arc::new(Mutex::new(State {
@@ -134,8 +93,6 @@ impl FaultDisk {
         }
     }
 
-    /// Seed a disk from an existing durable image (e.g. after an external crash
-    /// or to resume a campaign from a saved image).
     pub fn from_image(cfg: FaultConfig, seed: u64, image: Vec<u8>) -> Self {
         Self {
             st: Arc::new(Mutex::new(State {
@@ -149,7 +106,6 @@ impl FaultDisk {
         }
     }
 
-    /// A `BlockFile` handle onto this disk. Multiple handles share one disk.
     pub fn handle(&self) -> FaultFile {
         FaultFile {
             st: self.st.clone(),
@@ -160,25 +116,18 @@ impl FaultDisk {
         self.st.lock().unwrap().counters
     }
 
-    /// Number of un-synced writes currently in flight.
     pub fn pending_writes(&self) -> usize {
         self.st.lock().unwrap().pending.len()
     }
 
-    /// A copy of the durable (last-synced) image.
     pub fn durable_image(&self) -> Vec<u8> {
         self.st.lock().unwrap().durable.clone()
     }
 
-    /// A copy of the live image (what the process currently sees).
     pub fn live_image(&self) -> Vec<u8> {
         self.st.lock().unwrap().live.clone()
     }
 
-    /// Simulate power loss **now**. Un-synced writes are resolved per the fault
-    /// config (drop / tear / apply, possibly reordered); the result becomes the
-    /// new durable image. Volatile state is cleared, as if the process died and
-    /// a fresh one will re-open. Returns what happened, for the stats log.
     pub fn crash(&self) -> CrashReport {
         let mut st = self.st.lock().unwrap();
         st.counters.crashes += 1;
@@ -263,7 +212,6 @@ fn apply_torn(
     }
 }
 
-/// A `BlockFile` view onto a [`FaultDisk`].
 pub struct FaultFile {
     st: Arc<Mutex<State>>,
 }

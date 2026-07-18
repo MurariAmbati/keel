@@ -1,12 +1,3 @@
-//! Under-real-threads: concurrent increments over the KV never lose an update.
-//!
-//! Because `update` holds the bucket's write latch across its read-modify-write,
-//! two threads bumping the same key serialize; two threads on different buckets
-//! run concurrently. With more buckets than cache frames, the increments also
-//! drive dirty eviction under load. The invariant is that the grand total equals
-//! the number of increments issued — any lost update (a broken latch, a torn or
-//! mis-evicted bucket) would make it fall short.
-
 use keel_ckv::PagedKv;
 use keel_vfs::{BlockFile, MemDisk};
 use std::sync::Arc;

@@ -1,15 +1,3 @@
-//! Stress guard for the concurrent-checkpoint path. An adversarial review found a
-//! real race: `flush_all` used to clear a frame's dirty flag *after* releasing the
-//! buffer guard, so an insert that re-dirtied the page in that window could be
-//! marked clean and lost on the next eviction — no crash required. The fix couples
-//! the dirty flag to the buffer lock (writer sets it under the write guard, flush
-//! clears it under the read guard). That specific interleaving is timing-tight and
-//! not deterministically reproducible in a unit test (the window is a single lock
-//! acquire), so this test does not *prove* the fix by failing without it; it hammers
-//! `flush_all` alongside four inserting threads and asserts the concurrent path
-//! stays correct — no lost record, no torn record, no deadlock — in a live scan
-//! (after eviction churn) and after a final checkpoint + reopen.
-
 use keel_cbuffer::PageCache;
 use keel_cheap::{Heap, Rid};
 use keel_vfs::{BlockFile, MemDisk};

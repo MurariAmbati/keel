@@ -1,14 +1,3 @@
-//! The full-lifecycle differential (§7.4, the capstone).
-//!
-//! Earlier differentials pin one surface each (SELECT, DML, joins). This one runs a
-//! *random history* — CREATE, INSERT, UPDATE, DELETE, DROP-and-recreate — against
-//! the durable storage engine and the in-memory reference oracle in lockstep, and
-//! after every mutation compares a battery of read queries (filtered scans, an
-//! indexed lookup, an inner and a left join, DISTINCT, GROUP BY / HAVING, ORDER BY
-//! / LIMIT). Identical SQL drives both engines, so any divergence in stored state
-//! or query semantics — across the whole SQL surface, in random combination — shows
-//! up as a mismatched result set. Every failure replays from its `seed`.
-
 use std::sync::Arc;
 
 use keel_db::Database;
@@ -21,7 +10,6 @@ fn fresh_pair() -> (Database, MemDb) {
     (Database::open(disk, 32).unwrap(), MemDb::new())
 }
 
-/// Run a statement on both engines; both must agree on accept/reject.
 fn run_both(db: &Database, mem: &mut MemDb, sql: &str) {
     let d = db.execute(sql);
     let m = mem.execute(&parse_statement(sql).unwrap());
@@ -34,7 +22,6 @@ fn run_both(db: &Database, mem: &mut MemDb, sql: &str) {
     );
 }
 
-/// Compare a SELECT across both engines.
 fn compare(db: &Database, mem: &mut MemDb, sql: &str, seed: u64) {
     let got = db.execute(sql).unwrap().unwrap();
     let want = mem
@@ -48,9 +35,6 @@ fn compare(db: &Database, mem: &mut MemDb, sql: &str, seed: u64) {
 const CREATE_A: &str = "CREATE TABLE a (id INT, k INT, v INT)";
 const CREATE_B: &str = "CREATE TABLE b (id INT, k INT, w INT)";
 
-/// The read battery run after each mutation — deterministic ORDER BY so row order
-/// is comparable. Mixes streaming paths (scan/filter/join) and fallback paths
-/// (aggregate/group) so both are exercised against the oracle.
 const QUERIES: &[&str] = &[
     "SELECT id, k, v FROM a WHERE v > 5 ORDER BY id",
     "SELECT id FROM a WHERE k = 2 ORDER BY id",

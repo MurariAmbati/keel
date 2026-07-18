@@ -1,9 +1,3 @@
-//! Slice 2 of the engine swap: the policy and recovery primitives `keel-buffer`
-//! has that `cbuffer` lacked — no-steal, `invalidate`, the Dirty Page Table,
-//! `fetch_for_redo`, `flush_page`, and `sync`. Each is asserted against the
-//! behaviour `wal::TxnStore` actually depends on, since that is the crate these
-//! exist to serve.
-
 use keel_cbuffer::{CacheError, NoWal, PageCache, PageFormat};
 use keel_page::{PageType, SlottedPage, PAGE_SIZE};
 use keel_vfs::{BlockFile, MemDisk};

@@ -1,16 +1,3 @@
-//! `keel-tpch` — TPC-H-shaped analytical queries over the durable engine, timed
-//! (§8). The correctness of these query shapes is pinned by the differential in
-//! `db/tests/tpch_subset.rs`; this reports KEEL's own end-to-end latency for them at
-//! scale. A head-to-head against SQLite / DuckDB is the remaining benchmarking step
-//! (it needs those engines installed).
-//!
-//! Schema (TPC-H-lite, integer surrogates for decimals):
-//!   customer(c_id, c_seg)   orders(o_id, o_cust)
-//!   lineitem(l_id, l_order, l_qty, l_price, l_discount, l_flag)
-//!
-//! Queries: Q6 (filtered SUM), Q1 (grouped multi-measure aggregate), Q3 (three-way
-//! join + per-order revenue + ORDER BY + LIMIT).
-
 use std::sync::Arc;
 use std::time::Instant;
 

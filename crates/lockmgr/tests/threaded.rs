@@ -1,21 +1,3 @@
-//! The lock manager under **real threads** (P7, §5.1) — the single-threaded
-//! scripted tests prove the matrix and the deadlock detector in isolation; this
-//! proves the whole thing works as a concurrency-control service when many OS
-//! threads contend for it.
-//!
-//! A bank of accounts is protected *only* by the lock manager (the data itself has
-//! no mutex — each account is an atomic, and correctness rests on the manager
-//! granting no two conflicting X locks at once). Threads run random transfers; if
-//! the manager is correct, money is conserved exactly. Two acquisition disciplines
-//! are exercised: **sorted** (canonical order — deadlock-free) and **random**
-//! (deadlocks form and the detector must break them, the transaction retrying),
-//! and both must conserve the total.
-//!
-//! The synchronization is real: every `lock`/`release_all` goes through the shared
-//! `Mutex<LockManager>`, whose lock/unlock ordering establishes happens-before
-//! between a releaser and the next acquirer, so the atomic account reads/writes in
-//! the critical section are correctly ordered when the manager enforces exclusion.
-
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -46,9 +28,6 @@ impl Bank {
         self.next_txn.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Acquire an X lock on `res` for `txn`. `true` = held; `false` = the request
-    /// would deadlock (caller aborts and retries). A `Waiting` grant spins until the
-    /// holder releases and the FIFO queue promotes us.
     fn acquire(&self, txn: TxnId, res: Resource) -> bool {
         let grant = self.lm.lock().unwrap().lock(txn, res, Mode::X);
         match grant {
@@ -70,8 +49,6 @@ impl Bank {
         }
     }
 
-    /// Transfer `amt` from account `from` to `to` under 2PL. `sorted` picks the
-    /// lock-acquisition order: canonical (deadlock-free) or as-given (deadlock-prone).
     fn transfer(&self, from: usize, to: usize, amt: i64, sorted: bool) {
         let (r0, r1) = if sorted && from > to {
             (Resource::Row(0, to as u64), Resource::Row(0, from as u64))
@@ -138,16 +115,11 @@ fn run(sorted: bool) {
     );
 }
 
-/// Deadlock-free discipline (sorted acquisition): no aborts, pure mutual-exclusion
-/// stress. Conservation proves the manager serializes conflicting X holders.
 #[test]
 fn sorted_transfers_conserve_money() {
     run(true);
 }
 
-/// Deadlock-prone discipline (random acquisition): cycles form, the waits-for
-/// detector names victims, and the aborted transactions retry — yet money is still
-/// conserved and, crucially, no thread hangs (every join returns).
 #[test]
 fn random_transfers_trigger_and_survive_deadlocks() {
     run(false);

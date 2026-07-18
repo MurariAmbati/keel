@@ -1,19 +1,3 @@
-//! Crash campaign for the concurrent cache's checkpoint barrier (D-LATCH-6).
-//!
-//! KEEL's whole thesis is that durability is earned against an adversary, not
-//! asserted — so the concurrent cache is put over the fault-injecting disk. The
-//! property under test is the P1 durability boundary, now for `cbuffer`: after
-//! `checkpoint()` (flush every dirty page, then `sync`), the checkpointed pages
-//! survive a **vicious** power loss byte-exact, and cache-resident changes that
-//! were never checkpointed correctly do *not* reach disk.
-//!
-//! A separate "scratch" set is dirtied after the checkpoint and left un-synced,
-//! so the crash actually has something to drop, tear, and reorder — the campaign
-//! exercises the adversary while the checkpointed set stays untouchable (it lives
-//! in the durable image, which a crash only ever *adds* pending writes on top of).
-//! Each page carries a CRC over its payload so a torn checkpoint page would be
-//! caught, not silently accepted.
-
 use keel_cbuffer::PageCache;
 use keel_faultfs::{FaultConfig, FaultDisk};
 use keel_page::{crc32, PAGE_SIZE};
@@ -37,7 +21,6 @@ fn write_stamp(buf: &mut [u8], pid: u32, version: u32) {
     buf[8..12].copy_from_slice(&crc.to_le_bytes());
 }
 
-/// Verify a page's CRC and return `(pid, version)`.
 fn read_stamp(buf: &[u8]) -> (u32, u32, bool) {
     let pid = u32::from_le_bytes(buf[0..4].try_into().unwrap());
     let version = u32::from_le_bytes(buf[4..8].try_into().unwrap());

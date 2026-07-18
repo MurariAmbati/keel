@@ -1,28 +1,8 @@
-//! Multi-version concurrency control — snapshot isolation (D6 lane T2, §5.2).
-//!
-//! The semantic heart of the system is [`visible`]: given a tuple version's
-//! `(xmin, xmax)`, a reader's snapshot, and the transaction-status table (the
-//! CLOG analog), it decides whether that version is visible. It is a few lines,
-//! and it is exhaustively unit-tested over generated `(xmin, xmax, statuses,
-//! snapshot, reader)` matrices *before* it touches real data.
-//!
-//! On top sit an in-memory MVCC store demonstrating snapshot reads, the
-//! **first-updater-wins** write-conflict rule, and — deliberately — the
-//! **write-skew** anomaly that snapshot isolation permits (§5.3). Serializable SI
-//! (SIREAD locks, rw-antidependency detection) that would forbid it is extension
-//! R1; this crate exhibits the anomaly so the boundary is documented, not hidden.
-//!
-//! This is the visibility/anomaly core, now exercised under real threads
-//! (`tests/threaded.rs`) with a [`MvccStore::vacuum`] that reclaims dead versions
-//! (§5.2). Wiring the versions into the heap tuple header is the remaining phase.
-
 use std::collections::{BTreeSet, HashMap};
 
-/// A transaction id. Monotone from 1; 0 means "none/invalid".
 pub type TxnId = u64;
 pub const INVALID: TxnId = 0;
 
-/// The outcome of a transaction, per the status table (CLOG analog).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
     InProgress,
@@ -30,7 +10,6 @@ pub enum Status {
     Aborted,
 }
 
-/// The transaction-status table: `txn -> status`. Consulted by [`visible`].
 #[derive(Clone, Debug, Default)]
 pub struct Clog {
     status: HashMap<TxnId, Status>,
@@ -51,25 +30,18 @@ impl Clog {
     }
 }
 
-/// A transaction's snapshot: everything with id `>= xmax`, or in `in_flight`, was
-/// not yet committed when the snapshot was taken and so is invisible.
 #[derive(Clone, Debug)]
 pub struct Snapshot {
-    /// The first id not yet assigned when the snapshot was taken.
     pub xmax: TxnId,
-    /// Transactions in progress when the snapshot was taken.
     pub in_flight: BTreeSet<TxnId>,
 }
 
 impl Snapshot {
-    /// Was `t` already committed as of this snapshot? (Assigned before `xmax` and
-    /// not in flight — its commit status is then consulted by the caller.)
     fn precedes(&self, t: TxnId) -> bool {
         t < self.xmax && !self.in_flight.contains(&t)
     }
 }
 
-/// A tuple version. `xmin` created it; `xmax` deleted it (`INVALID` = live).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Version {
     pub xmin: TxnId,
@@ -85,13 +57,6 @@ impl Version {
     }
 }
 
-/// **The visibility function.** Is `v` visible to `reader` under `snap`/`clog`?
-///
-/// A version is visible iff its insertion is visible and its deletion is not:
-///   * the insert (`xmin`) is visible if it is the reader's own, or it committed
-///     before the snapshot;
-///   * the delete (`xmax`) hides the tuple if it is the reader's own, or it
-///     committed before the snapshot; otherwise the tuple survives.
 pub fn visible(v: &Version, snap: &Snapshot, clog: &Clog, reader: TxnId) -> bool {
     let insert_visible = if v.xmin == reader {
         true
@@ -112,33 +77,24 @@ pub fn visible(v: &Version, snap: &Snapshot, clog: &Clog, reader: TxnId) -> bool
     !delete_visible
 }
 
-/// One logical row is a newest-first chain of versions (D7: in-heap chains).
 #[derive(Clone, Debug)]
 struct Chain {
     versions: Vec<(Version, i64)>,
 }
 
-/// Errors from the transactional store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MvccError {
-    /// A write-write conflict under snapshot isolation (first-updater-wins).
     WriteConflict,
-    /// No visible version of the row for this transaction.
     NotVisible,
-    /// SSI aborted this transaction to preserve serializability (it was the pivot
-    /// of a dangerous rw-antidependency structure). Retryable.
     Serialization,
 }
 
-/// A transaction handle: its id and the snapshot taken at begin.
 pub struct Txn {
     pub id: TxnId,
     pub snapshot: Snapshot,
-    /// Rows this txn has written (for own-write visibility and conflict tracking).
     written: BTreeSet<usize>,
 }
 
-/// A tiny multi-versioned key→i64 store under snapshot isolation.
 #[derive(Default)]
 pub struct MvccStore {
     rows: Vec<Chain>,
@@ -157,8 +113,6 @@ impl MvccStore {
         }
     }
 
-    /// Insert a brand-new row committed by a system bootstrap transaction, and
-    /// return its row id. (Setup convenience — a committed initial version.)
     pub fn bootstrap_row(&mut self, value: i64) -> usize {
         let t = self.next_txn;
         self.next_txn += 1;
@@ -185,7 +139,6 @@ impl MvccStore {
         }
     }
 
-    /// The value of `row` visible to `txn`, or `NotVisible`.
     pub fn read(&self, txn: &Txn, row: usize) -> Result<i64, MvccError> {
         let chain = &self.rows[row];
         for (v, val) in chain.versions.iter().rev() {
@@ -196,16 +149,6 @@ impl MvccStore {
         Err(MvccError::NotVisible)
     }
 
-    /// Update `row` to `value`. First-updater-wins: if the row's newest version
-    /// was created or deleted by a concurrent transaction (not visible to our
-    /// snapshot and not our own), abort with `WriteConflict` (SI's rule).
-    ///
-    /// The conflict check is against the newest **non-aborted** version. Aborted
-    /// versions are logically dead, but they physically remain at the tail of the
-    /// chain; testing `versions.last()` would let a single aborted tail poison every
-    /// future update with a false conflict (a real bug — KEEL-0003 — that only
-    /// surfaces when an aborted transaction is followed by a retry on the same row,
-    /// as under concurrency). Skipping them restores progress.
     pub fn update(&mut self, txn: &mut Txn, row: usize, value: i64) -> Result<(), MvccError> {
         let idx = {
             let chain = &self.rows[row];
@@ -243,20 +186,10 @@ impl MvccStore {
         self.active.remove(&txn.id);
     }
 
-    /// Number of physical versions currently retained for `row` (for tests/telemetry).
     pub fn version_count(&self, row: usize) -> usize {
         self.rows[row].versions.len()
     }
 
-    /// Reclaim dead versions (§5.2 vacuum). Two collections, both always safe.
-    /// First, **aborted** versions — never visible to any transaction (SI requires
-    /// a committed `xmin`), so they can always be dropped; this also clears the
-    /// KEEL-0003 dead-tail buildup. Second, when **no transaction is active**, every
-    /// committed version older than a row's newest committed one — a future
-    /// transaction only ever sees the newest committed version, so the rest are
-    /// superseded and unreachable. In-progress versions (an active transaction's own
-    /// writes) are always kept. Returns the number of versions reclaimed. (A real
-    /// engine runs this in a background sweep; here it is an explicit, testable op.)
     pub fn vacuum(&mut self) -> usize {
         let no_active = self.active.is_empty();
         let mut reclaimed = 0;
@@ -307,27 +240,16 @@ impl Default for Txn {
     }
 }
 
-/// Per-transaction SSI bookkeeping: its snapshot, read/write sets, the set of
-/// transactions concurrent with it, its outbound rw-antidependency edges, and
-/// whether any inbound edge exists.
 #[derive(Debug)]
 struct SsiTxnMeta {
     snapshot: Snapshot,
     reads: BTreeSet<usize>,
     writes: BTreeSet<usize>,
     concurrent: BTreeSet<TxnId>,
-    /// Transactions this one has an rw-antidependency *to* (it read, they wrote).
     out_edges: BTreeSet<TxnId>,
-    /// Some concurrent transaction has an rw-antidependency *to* this one.
     in_conflict: bool,
 }
 
-/// A multi-versioned key→i64 store under **serializable** snapshot isolation.
-///
-/// Same storage and visibility as [`MvccStore`], plus rw-antidependency tracking
-/// and the dangerous-structure abort at commit. The single behavioral difference
-/// a caller sees: the write-skew schedule that [`MvccStore`] commits, this store
-/// rejects with [`MvccError::Serialization`].
 #[derive(Default)]
 pub struct SsiStore {
     rows: Vec<Chain>,
@@ -348,7 +270,6 @@ impl SsiStore {
         }
     }
 
-    /// Insert an initial committed row (setup convenience), returning its id.
     pub fn bootstrap_row(&mut self, value: i64) -> usize {
         let t = self.next_txn;
         self.next_txn += 1;
@@ -359,8 +280,6 @@ impl SsiStore {
         self.rows.len() - 1
     }
 
-    /// Begin a transaction: take a snapshot and record it as concurrent with (and
-    /// in) every currently-active transaction.
     pub fn begin(&mut self) -> TxnId {
         let id = self.next_txn;
         self.next_txn += 1;
@@ -390,9 +309,6 @@ impl SsiStore {
         id
     }
 
-    /// The value of `row` visible to `txn`. Records the read and any
-    /// rw-antidependency to a concurrent transaction that already wrote `row`
-    /// (this txn read an older version → `txn -> writer`).
     pub fn read(&mut self, txn: TxnId, row: usize) -> Result<i64, MvccError> {
         let concurrent = self.meta[&txn].concurrent.clone();
         self.meta.get_mut(&txn).unwrap().reads.insert(row);
@@ -411,9 +327,6 @@ impl SsiStore {
         Err(MvccError::NotVisible)
     }
 
-    /// Update `row`. First-updater-wins (as in [`MvccStore`]), plus: any
-    /// concurrent transaction that already read `row` gains an rw-antidependency
-    /// to this one (`reader -> txn`).
     pub fn update(&mut self, txn: TxnId, row: usize, value: i64) -> Result<(), MvccError> {
         let (newest, _) = *self.rows[row].versions.last().unwrap();
         let creator = newest.xmin;
@@ -441,9 +354,6 @@ impl SsiStore {
         Ok(())
     }
 
-    /// Commit under SSI. Aborts with [`MvccError::Serialization`] iff `txn` is the
-    /// pivot of a completed dangerous structure: it has an inbound
-    /// rw-antidependency and an outbound one to an already-committed transaction.
     pub fn commit(&mut self, txn: TxnId) -> Result<(), MvccError> {
         let (has_in, out_to_committed) = {
             let m = &self.meta[&txn];

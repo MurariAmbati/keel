@@ -1,12 +1,3 @@
-//! Race oracle for `new_page`: concurrent allocation hands out unique page ids
-//! and every allocated page persists through a checkpoint and reopen.
-//!
-//! Many threads allocate fresh pages, stamp each with its own page id, and record
-//! the ids they were given. Two invariants: **no two allocations share an id**
-//! (the count of distinct ids equals the count of allocations), and after a
-//! `checkpoint` and reopen **every** allocated page reads back its own id — so no
-//! allocation was lost, aliased, or left unmaterialized on disk.
-
 use keel_cbuffer::PageCache;
 use keel_vfs::{BlockFile, MemDisk};
 use std::collections::HashSet;

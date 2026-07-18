@@ -1,20 +1,8 @@
-//! The race oracle for the latch primitives (D-LATCH-0).
-//!
-//! Each test targets one of the properties a concurrent buffer pool must have,
-//! and each would *fail or hang* if that property were absent — the failure
-//! modes are real data races and deadlocks that no single-threaded test can
-//! reach, which is the whole reason this seam is built and proven before it is
-//! wired into the pool.
-
 use keel_latch::{write_two_ordered, LatchTable};
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-/// Find-or-install is atomic: many threads racing on a tiny key space converge
-/// on one latch per key, so `make` runs exactly once per key and the install
-/// count equals the number of distinct keys. A double-install (the buffer's
-/// `resident()`-then-load TOCTOU) would push both above the key count.
 #[test]
 fn get_or_install_is_atomic_under_races() {
     const THREADS: usize = 8;
@@ -60,10 +48,6 @@ fn get_or_install_is_atomic_under_races() {
     assert_eq!(table.len(), KEYS as usize);
 }
 
-/// The write latch gives real mutual exclusion. Each thread does a
-/// load-compute-store on a shared cell through the exclusive latch — a sequence
-/// that loses updates the instant two threads run it concurrently. If every
-/// increment survives, no two writers were ever inside the latch at once.
 #[test]
 fn exclusive_latch_serializes_writes() {
     const THREADS: i64 = 8;
@@ -94,11 +78,6 @@ fn exclusive_latch_serializes_writes() {
     );
 }
 
-/// Read latches are genuinely shared. All readers acquire the same latch and
-/// meet at a barrier while still holding their guards; the peak concurrency
-/// therefore reaches the full reader count. A mutual-exclusion primitive would
-/// let only one in and the rest would block forever at acquisition — the test
-/// would hang rather than record a peak of `READERS`.
 #[test]
 fn shared_latches_are_concurrent() {
     const READERS: usize = 6;
@@ -142,12 +121,6 @@ fn shared_latches_are_concurrent() {
     );
 }
 
-/// Ordered two-latch acquisition is deadlock-free. Two threads move value
-/// between the same pair of pages from opposite directions; because
-/// `write_two_ordered` always takes the lower page id first, no wait-for cycle
-/// can form. Naive argument-order acquisition would deadlock here and the joins
-/// would hang. Money conservation (and the exact net) proves exclusion held for
-/// every paired update.
 #[test]
 fn write_two_ordered_never_deadlocks_and_conserves() {
     const ROUNDS: i64 = 50_000;

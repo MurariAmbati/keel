@@ -1,12 +1,3 @@
-//! Multi-way join differential — the streaming hash-join fold across 3 and 4
-//! tables, in chain and star shapes, checked against the reference oracle.
-//!
-//! `try_stream_join` folds the FROM tables left-deep, extracting one equijoin per
-//! step; earlier per-surface tests only exercised two tables. Here random 3- and
-//! 4-table joins run through the streaming path and must match the materializing
-//! reference engine exactly, with a `join_streams` assertion proving the hash-join
-//! path (not the fallback) served them. Every failure replays from its `seed`.
-
 use std::sync::Arc;
 
 use keel_db::Database;

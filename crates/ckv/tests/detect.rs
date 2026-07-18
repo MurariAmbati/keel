@@ -1,16 +1,3 @@
-//! Positive corruption-detection test: the crate's headline guarantee is that
-//! "corruption is never silent", and this asserts it *directly* rather than hoping
-//! a fault-injected crash happens to produce a readable-but-torn page.
-//!
-//! An adversarial audit showed the crash campaign was structurally unfalsifiable
-//! for this property — it passed unchanged with checksum verification removed,
-//! because across 24 seeds the adversary mostly *dropped* pending writes (leaving
-//! the intact checkpointed page) rather than mixing sectors into a page that
-//! decodes as plausible data. Strengthening that test's assertions helped but did
-//! not make it falsifiable. So corruption is injected deterministically here
-//! instead: flip one byte in a bucket page's entry area on disk, and every read
-//! path must report `Corrupt` rather than return the damaged bytes as data.
-
 use keel_ckv::{KvError, PagedKv};
 use keel_page::PAGE_SIZE;
 use keel_vfs::{BlockFile, MemDisk};

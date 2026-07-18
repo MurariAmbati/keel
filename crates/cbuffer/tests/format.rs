@@ -1,13 +1,3 @@
-//! `PageFormat`: the cache stamps a page's checksum on every write and verifies it
-//! on every read, so **no caller can forget** — the structural cure for the
-//! KEEL-0004 class (`cheap` had to recompute the checksum by hand at each mutating
-//! site, and the one path that forgot persisted a stale checksum) and for KEEL-0010
-//! (`ckv` never consulted its own CRC on four of six paths).
-//!
-//! `keel-buffer` has always centralised this in its flush/load paths; `cbuffer` had
-//! neither until now. The invariant established is **"a page's checksum is correct on
-//! disk"** — a dirty cached page legitimately carries a stale one until it is flushed.
-
 use keel_cbuffer::{CacheError, NoWal, PageCache, PageFormat};
 use keel_page::{PageType, SlottedPage, PAGE_SIZE};
 use keel_vfs::{BlockFile, MemDisk};

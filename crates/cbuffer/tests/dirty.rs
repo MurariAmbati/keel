@@ -1,18 +1,3 @@
-//! Race oracle for dirty-page eviction under WAL-before-data (D-LATCH-4, slice 2).
-//!
-//! Two invariants are checked at once, under real concurrency with disk I/O
-//! outside the directory lock:
-//!
-//! 1. **WAL-before-data** — a `GuardDisk` wraps the backing file and, on every
-//!    write, reads the page's embedded LSN and asserts the shared WAL is already
-//!    durable through it. If the cache ever wrote a dirty page before forcing the
-//!    log, the guard records a violation. (This is the same check
-//!    `buffer::flush_frame` makes with a `debug_assert`, here promoted to a live
-//!    counter across threads.)
-//! 2. **No wrong page under a pin** — every page keeps its id stamp through
-//!    countless dirty evictions and reloads; the two-copies-of-a-dirty-page race
-//!    would surface as a mismatched stamp.
-
 use keel_cbuffer::{PageCache, WalSync};
 use keel_page::PAGE_SIZE;
 use keel_vfs::{BlockFile, MemDisk};
@@ -21,7 +6,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 
-/// Shared WAL state: a single global high-water LSN, the log's durable frontier.
 struct SharedWal {
     flushed: AtomicU64,
 }
@@ -35,8 +19,6 @@ impl WalSync for SharedWal {
     }
 }
 
-/// A backing file that enforces WAL-before-data: every write must find the log
-/// already durable through the page's LSN, or it is a counted violation.
 struct GuardDisk {
     inner: Arc<dyn BlockFile>,
     wal: Arc<SharedWal>,

@@ -1,13 +1,3 @@
-//! Differential over the `RecoveryPager` surface — the primitives `wal::TxnStore`
-//! depends on, compared across both pools before `wal` is migrated onto them.
-//!
-//! Same discipline as `differential.rs` one layer down: rather than flipping `wal`
-//! and hoping the recovery semantics match, the semantics are compared directly.
-//! Steal policy, DPT bookkeeping, abort-time invalidation, and the fault-tolerant
-//! redo fetch are exactly the places where a subtle difference between the two pools
-//! would show up as a *recovery* bug — the worst kind to debug, because it only
-//! appears after a crash.
-
 use keel_buffer::BufferPool;
 use keel_cbuffer::{NoWal, PageCache, PageFormat};
 use keel_page::{PageType, SlottedPage};
@@ -15,7 +5,6 @@ use keel_pager::{Pager, PagerError, RecoveryPager};
 use keel_vfs::{BlockFile, MemDisk};
 use std::sync::Arc;
 
-/// Observable recovery behaviour, in the order `wal` would exercise it.
 type Observed = (Vec<(u32, u64)>, Vec<(u32, u64)>, bool, Vec<u8>, u32);
 
 fn exercise_recovery<P: RecoveryPager>(bp: &P) -> Result<Observed, PagerError> {

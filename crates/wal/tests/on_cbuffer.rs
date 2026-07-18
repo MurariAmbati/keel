@@ -1,18 +1,3 @@
-//! `TxnStore` on the **concurrent** page cache (engine-swap slice 5c).
-//!
-//! `wal` was the deepest consumer of the old pool — it uses the entire recovery
-//! surface (no-steal, DPT, invalidate, commit-force, checkpoint). It is now generic
-//! over `keel_pager::RecoveryPager`, defaulting to `BufferPool` so `open`/`open_with`
-//! and every existing test and crash campaign are unaffected; `TxnStore::with_pager`
-//! is the seam the concurrent cache enters through.
-//!
-//! The delicate part was `write`, which holds the page guard across the log append.
-//! Under closure-scoped access that whole log-then-apply step moves inside the
-//! closure, so the lock order is page-buffer → log — matching `cbuffer`'s flush path,
-//! which holds the buffer read guard across `wal.flush_until`. Same order, no cycle.
-//! This test drives that path on the concurrent cache and compares against the
-//! single-threaded pool.
-
 use keel_cbuffer::{PageCache, PageFormat, WalSync as CWalSync};
 use keel_page::PageType;
 use keel_pager::RecoveryPager;
@@ -24,8 +9,6 @@ const FRAMES: usize = 8;
 const PAGES: usize = 6;
 const WRITES: usize = 40;
 
-/// The `cbuffer` side of the WAL seam: the same `Log` the store appends to, exposed
-/// as the cache's durability gate so WAL-before-data is enforced on flush.
 struct LogGate {
     log: Arc<Mutex<Log>>,
 }
@@ -38,7 +21,6 @@ impl CWalSync for LogGate {
     }
 }
 
-/// Run a transactional workload and report every page's bytes plus the store stats.
 fn exercise<P: RecoveryPager>(store: &TxnStore<P>) -> (Vec<Vec<u8>>, u64) {
     let mut pids = Vec::new();
     store.begin();

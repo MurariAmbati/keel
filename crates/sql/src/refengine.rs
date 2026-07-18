@@ -1,14 +1,3 @@
-//! The reference engine (§7.1): an in-memory catalog plus the naivest possible
-//! executor over `Vec<Row>`. It is slow and obviously correct — the semantic
-//! oracle every random query is checked against. Three-valued NULL logic is
-//! implemented here exactly (§6.1, D10), because NULL semantics is the SQL bug
-//! farm and this is the yardstick.
-//!
-//! Supports the freeze set: `CREATE TABLE`, `INSERT`, and `SELECT` with `WHERE`,
-//! inner/left joins, `GROUP BY`/`HAVING` with the five aggregates, `ORDER BY`,
-//! `LIMIT`, `DISTINCT`, `CASE`, `IN` (list and uncorrelated subquery), and
-//! uncorrelated scalar subqueries.
-
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
@@ -31,7 +20,6 @@ fn err<T>(m: impl Into<String>) -> Result<T, ExecError> {
 }
 type R<T> = Result<T, ExecError>;
 
-/// A named result set.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResultSet {
     pub columns: Vec<String>,
@@ -44,7 +32,6 @@ struct Table {
     rows: Vec<Row>,
 }
 
-/// An in-memory database: named tables with schemas and rows.
 #[derive(Clone, Debug, Default)]
 pub struct MemDb {
     tables: BTreeMap<String, Table>,
@@ -59,9 +46,6 @@ impl MemDb {
         self.tables.keys().cloned().collect()
     }
 
-    /// Install a table directly from a schema and materialized rows — used by the
-    /// storage engine to run the reference-engine semantics over heap-scanned
-    /// rows (until the Volcano executor lands at P5).
     pub fn install_table(&mut self, name: &str, schema: Schema, rows: Vec<Row>) {
         self.tables.insert(name.to_string(), Table { schema, rows });
     }
@@ -74,8 +58,6 @@ impl MemDb {
         self.tables.get(name).map(|t| t.rows.as_slice())
     }
 
-    /// Execute a parsed statement. `SELECT` returns a `ResultSet`; DDL/DML return
-    /// `None` and mutate the database.
     pub fn execute(&mut self, stmt: &Stmt) -> R<Option<ResultSet>> {
         match stmt {
             Stmt::CreateTable(ct) => {
@@ -107,8 +89,6 @@ impl MemDb {
         }
     }
 
-    /// `DELETE FROM t [WHERE pred]`: drop every row for which `pred` is TRUE (a
-    /// missing `WHERE` deletes all). Returns nothing; mutates the table.
     fn delete(&mut self, del: &Delete) -> R<()> {
         let table = self
             .tables
@@ -137,9 +117,6 @@ impl MemDb {
         Ok(())
     }
 
-    /// `UPDATE t SET c = e, ... [WHERE pred]`: for each matching row, evaluate
-    /// every right-hand side against the *pre-update* row (SQL semantics), coerce
-    /// into the column type, enforce NOT NULL, then write.
     fn update(&mut self, upd: &Update) -> R<()> {
         let table = self
             .tables
@@ -197,7 +174,6 @@ impl MemDb {
         Ok(())
     }
 
-    /// Run a `SELECT` read-only (no mutation).
     pub fn query(&self, q: &Select) -> R<ResultSet> {
         self.run_select(q)
     }
@@ -369,8 +345,6 @@ impl MemDb {
         })
     }
 
-    /// Group the frames by the GROUP BY key. With aggregates but no GROUP BY, a
-    /// single group over all rows (which still yields one row for `COUNT` etc.).
     fn make_groups(
         &self,
         q: &Select,
@@ -401,8 +375,6 @@ impl MemDb {
         Ok(groups)
     }
 
-    /// Build the joined frame set: a schema (list of bindings) and one row per
-    /// combination surviving the join conditions.
     fn build_from(&self, q: &Select) -> R<(Vec<Binding>, Vec<Row>)> {
         let Some(from) = &q.from else {
             return Ok((Vec::new(), vec![Vec::new()]));
@@ -459,7 +431,6 @@ impl MemDb {
         Ok((bindings, table.rows.clone()))
     }
 
-    /// Expand `*` / `t.*` and collect the projection expressions and output names.
     fn expand_items(
         &self,
         q: &Select,
@@ -491,9 +462,6 @@ impl MemDb {
     }
 }
 
-/// Resolve one ORDER BY key to a sortable value: an output-column name/alias, a
-/// 1-based position literal, or (falling back) an expression evaluated against
-/// the source row via `eval_source`.
 fn resolve_order_key(
     expr: &Expr,
     out_cols: &[String],
@@ -526,7 +494,6 @@ struct Binding {
     ty: ColumnType,
 }
 
-/// Bindings for a single table scanned under `alias` (the DELETE/UPDATE scope).
 fn single_table_bindings(alias: &str, schema: &Schema) -> Vec<Binding> {
     schema
         .columns
@@ -564,7 +531,6 @@ impl EvalCtx<'_> {
     }
 }
 
-/// A constant-only evaluation (for INSERT VALUES).
 fn eval_const(e: &Expr) -> R<Value> {
     let db = MemDb::new();
     let ctx = EvalCtx {
@@ -575,21 +541,14 @@ fn eval_const(e: &Expr) -> R<Value> {
     eval(e, &ctx)
 }
 
-/// Evaluate a constant expression to a value (public entry for the storage
-/// engine's INSERT path).
 pub fn eval_literal(e: &Expr) -> Result<Value, ExecError> {
     eval_const(e)
 }
 
-/// Coerce a value into a column's declared type (public entry for INSERT).
 pub fn coerce_into(v: Value, ty: ColumnType) -> Result<Value, ExecError> {
     coerce(v, ty)
 }
 
-/// Evaluate a subquery-free expression over a positional row whose columns are
-/// described by `cols` as `(table_alias, column_name)`. The public entry the
-/// streaming (Volcano) executor uses; expressions containing subqueries are
-/// rejected (the caller falls back to the materializing path).
 pub fn eval_public(
     expr: &Expr,
     cols: &[(String, String)],
@@ -612,13 +571,10 @@ pub fn eval_public(
     eval(expr, &ctx)
 }
 
-/// The output column label an expression produces (bare column name, else a
-/// placeholder). Shared so the streaming executor's column names match exactly.
 pub fn column_label(e: &Expr) -> String {
     expr_label(e)
 }
 
-/// Whether an expression is safe for `eval_public` (contains no subquery).
 pub fn is_subquery_free(e: &Expr) -> bool {
     match e {
         Expr::ScalarSubquery(_) | Expr::InSubquery { .. } => false,
@@ -740,7 +696,6 @@ fn eval(e: &Expr, ctx: &EvalCtx) -> R<Value> {
     }
 }
 
-/// Evaluate an expression that may contain aggregates, over a group's rows.
 fn eval_grouped(
     e: &Expr,
     bindings: &[Binding],
@@ -897,7 +852,6 @@ fn or3(l: Option<bool>, r: Option<bool>) -> Value {
         _ => Value::Null,
     }
 }
-/// A predicate keeps a row only when it is TRUE (NULL and FALSE both drop).
 fn truthy(v: Value) -> bool {
     matches!(v, Value::Bool(true))
 }
@@ -1028,7 +982,6 @@ fn to_f64_sum(vals: &[Value]) -> R<f64> {
     Ok(s)
 }
 
-/// A total-order wrapper for `Value` (NULLs sort lowest, per `Value::total_cmp`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OrdVal(Value);
 impl PartialOrd for OrdVal {
@@ -1087,7 +1040,6 @@ fn expr_label(e: &Expr) -> String {
     }
 }
 
-/// `coerce` a literal value into a column's declared type (INSERT path).
 fn coerce(v: Value, ty: ColumnType) -> R<Value> {
     if v.is_null() {
         return Ok(Value::Null);

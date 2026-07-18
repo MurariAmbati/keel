@@ -1,16 +1,3 @@
-//! Crash campaign v0 — the P1 rung of §7.3, before the WAL exists.
-//!
-//! There is no recovery yet (that is the P3 ladder), so this does not claim the
-//! database is *consistent* after a crash. It claims the weaker, load-bearing
-//! thing the whole edifice will be built on: **corruption is never silent.**
-//! Every page KEEL writes is whole and checksummed; the fault disk tears some of
-//! them on crash; on reopen, `dbcheck` must catch every torn page, and must
-//! never accept a torn page as valid. Any downstream inconsistency (a dangling
-//! forward, an orphaned target) is only ever a *consequence* of a detected torn
-//! page — which is precisely the gap the ARIES ladder closes at P3.
-//!
-//! Every failure here replays from its `seed`.
-
 use std::sync::Arc;
 
 use keel_buffer::BufferPool;
@@ -20,8 +7,6 @@ use keel_heap::HeapFile;
 use keel_rng::Rng;
 use keel_vfs::BlockFile;
 
-/// Benign crash (no tearing/dropping): a checkpoint is a hard durability
-/// barrier, so everything written before it survives and reads back exactly.
 #[test]
 fn benign_crash_preserves_checkpointed_data() {
     for seed in 0..16u64 {
@@ -64,8 +49,6 @@ fn benign_crash_preserves_checkpointed_data() {
     }
 }
 
-/// Vicious crashes (tearing + dropping + reordering), many cycles. The safety
-/// net must hold: no torn page is ever silently accepted.
 #[test]
 fn vicious_crashes_are_always_detected() {
     let mut torn_pages_seen = 0u64;

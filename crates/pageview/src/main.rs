@@ -1,9 +1,3 @@
-//! `pageview <file> <page>` — a schema-aware hexdump of one page (D12).
-//!
-//! The debugging instrument you live inside during the storage phases: it
-//! interprets the header, lists the slot directory, annotates heap records by
-//! kind, and flags a checksum mismatch loudly.
-
 use std::process::ExitCode;
 
 use keel_heap::{classify_record, RecordKind};

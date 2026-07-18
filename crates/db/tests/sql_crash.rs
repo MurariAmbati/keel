@@ -1,21 +1,3 @@
-//! SQL-level crash campaign (§7.3 at the query surface).
-//!
-//! The page-level crash campaigns prove the storage floor; this proves the same
-//! durability barrier one layer up, in the terms a user cares about: **after a
-//! statement returns, its effect survives a power loss** — because every DML
-//! statement ends in a checkpoint (flush + fsync), and a checkpoint is a hard
-//! barrier. We build a real SQL state (a table, an index, INSERTs, then an UPDATE
-//! and a DELETE), pull the power with a benign crash, reopen from the durable
-//! image, and require that the exact committed state reads back — including
-//! index-served lookups and the post-DML values — with `dbcheck` finding the raw
-//! file well-formed.
-//!
-//! This is the honest boundary of the *current* engine: durability is
-//! checkpoint-granular, not yet mid-statement-atomic (routing DML through the
-//! page-level ARIES WAL is the remaining integration). So the crash here is at a
-//! sync boundary, which is exactly the guarantee checkpoint-durability makes.
-//! Every failure replays from its `seed`.
-
 use std::sync::Arc;
 
 use keel_db::Database;
@@ -99,8 +81,6 @@ fn benign_crash_preserves_sql_state() {
     }
 }
 
-/// A second table interleaved with the first: reopening must rebuild the whole
-/// self-hosting catalog from the heap, not just the last table.
 #[test]
 fn benign_crash_preserves_multiple_tables() {
     let disk = FaultDisk::new(FaultConfig::benign(), 99);

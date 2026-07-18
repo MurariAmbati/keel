@@ -1,13 +1,3 @@
-//! Race oracle for the concurrent page cache with I/O outside the lock.
-//!
-//! More distinct pages than frames, so threads continuously evict one another's
-//! unpinned pages while disk reads run with the directory lock released. Every
-//! page is stamped with its id on disk; each thread reads every page it pins and
-//! checks the stamp equals the id. A race in the reserve/publish protocol — a
-//! frame published for the wrong page, a duplicate load clobbering a pinned
-//! frame, a victim taken while pinned — would surface as a wrong stamp under a
-//! held pin, not as silent corruption.
-
 use keel_cbuffer::PageCache;
 use keel_page::PAGE_SIZE;
 use keel_vfs::{BlockFile, MemDisk};

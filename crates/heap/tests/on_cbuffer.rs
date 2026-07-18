@@ -1,18 +1,3 @@
-//! The heap runs on the **concurrent** page cache (engine-swap slice 4b).
-//!
-//! `HeapFile` is now generic over `keel_pager::Pager`, defaulting to `BufferPool` so
-//! `db`, `wal`, and `dbcheck` compile untouched. This drives the *same* heap over
-//! both pools and requires exact agreement.
-//!
-//! The workload deliberately hits the paths that made `heap` the riskier half of
-//! this slice: the **FSM rebuild** in `open` (which scans every page), and the
-//! **forwarding-stub** path, where an update that no longer fits in place relocates
-//! the record to another page and leaves a stub behind — the one place the heap
-//! touches two pages for one logical operation. Those were the sites most likely to
-//! hold a page guard across another fetch, which closure-scoped access forbids; the
-//! crate turned out to already copy bytes out and drop the guard first, which is why
-//! the conversion was mechanical. This test is the evidence for that claim.
-
 use keel_buffer::BufferPool;
 use keel_cbuffer::{NoWal, PageCache, PageFormat};
 use keel_heap::HeapFile;
@@ -25,8 +10,6 @@ use std::sync::Arc;
 const FRAMES: usize = 6;
 const N: u64 = 300;
 
-/// Everything observable: the ordered live set, per-RID probes, and (forward hops,
-/// distinct pages spanned) — the latter pair proving the interesting paths ran.
 type Observed = (Vec<(u32, u16, Vec<u8>)>, Vec<Option<Vec<u8>>>, (u64, u64));
 
 fn exercise<P: Pager>(bp: &P) -> Observed {

@@ -1,18 +1,3 @@
-//! **The whole SQL engine on the concurrent page cache** — the point of the entire
-//! engine-swap arc (slices 1–5).
-//!
-//! `Database` is now generic over `keel_pager::RecoveryPager`, defaulting to
-//! `BufferPool` so every existing caller — `shell`, `bench`, `dbcheck`, and all 34
-//! of `db`'s own tests — compiles untouched. `Database::with_pager` is the seam the
-//! concurrent `PageCache` enters through.
-//!
-//! This runs a real SQL workload (DDL, inserts, a secondary index, updates, deletes,
-//! a join, an aggregate, ANALYZE) through `Database<PageCache>` and through
-//! `Database<BufferPool>`, and requires identical results — then checkpoints and
-//! reopens on the concurrent cache to confirm durability. Every layer below has been
-//! differentially compared already (pager, recovery surface, heap, btree); this is
-//! the top of that stack.
-
 use keel_cbuffer::{NoWal, PageCache, PageFormat};
 use keel_db::Database;
 use keel_pager::RecoveryPager;
@@ -21,8 +6,6 @@ use std::sync::Arc;
 
 const FRAMES: usize = 16;
 
-/// Statements whose results must match on both pools. Kept as `&str` so the two
-/// runs are provably the same workload.
 const WORKLOAD: &[&str] = &[
     "CREATE TABLE dept (id BIGINT, name TEXT)",
     "CREATE TABLE emp (id BIGINT, dept_id BIGINT, name TEXT, salary BIGINT)",

@@ -1,16 +1,3 @@
-//! Deterministic, seedable PRNG for KEEL's campaigns.
-//!
-//! Every campaign in the project — the crash injector (§7.3), the heap/B-tree
-//! fuzzers (§3.5), the SQL query generator (§7.2) — replays from a `(seed, ...)`
-//! pair. That contract only holds if randomness is fully reproducible and owned
-//! by us, so we carry our own generator rather than depend on a crate whose
-//! stream could shift under a version bump. `SplitMix64` seeds, `Xoshiro256++`
-//! is the stream.
-//!
-//! This crate has no `unsafe` and no dependencies.
-
-/// SplitMix64 — used only to expand a single `u64` seed into the four words of
-/// an `Xoshiro256++` state. Fine as a seeder, not used as the stream generator.
 #[derive(Clone, Debug)]
 pub struct SplitMix64 {
     state: u64,
@@ -30,16 +17,12 @@ impl SplitMix64 {
     }
 }
 
-/// Xoshiro256++ 1.0 — fast, well-distributed, 2^256 period. The stream every
-/// campaign draws from.
 #[derive(Clone, Debug)]
 pub struct Rng {
     s: [u64; 4],
 }
 
 impl Rng {
-    /// Seed the full state from one `u64`. Distinct seeds give independent,
-    /// reproducible streams; the same seed always replays byte-for-byte.
     pub fn seed(seed: u64) -> Self {
         let mut sm = SplitMix64::new(seed);
         Self {
@@ -70,7 +53,6 @@ impl Rng {
         (self.next_u64() >> 32) as u32
     }
 
-    /// Uniform in `[0, n)` via Lemire's fast reduction. `n == 0` returns 0.
     #[inline]
     pub fn below(&mut self, n: u64) -> u64 {
         if n == 0 {
@@ -79,26 +61,22 @@ impl Rng {
         ((self.next_u64() as u128 * n as u128) >> 64) as u64
     }
 
-    /// Uniform in `[lo, hi)`. Panics if `lo >= hi` under debug assertions.
     #[inline]
     pub fn range(&mut self, lo: u64, hi: u64) -> u64 {
         debug_assert!(lo < hi, "empty range [{lo}, {hi})");
         lo + self.below(hi - lo)
     }
 
-    /// `true` with probability `1/n` (`n == 0` never fires).
     #[inline]
     pub fn one_in(&mut self, n: u64) -> bool {
         n != 0 && self.below(n) == 0
     }
 
-    /// `true` with the given probability in `[0.0, 1.0]`.
     #[inline]
     pub fn chance(&mut self, p: f64) -> bool {
         (self.next_u64() as f64 / u64::MAX as f64) < p
     }
 
-    /// Fill a byte buffer from the stream.
     pub fn fill_bytes(&mut self, buf: &mut [u8]) {
         let mut chunks = buf.chunks_exact_mut(8);
         for c in &mut chunks {
@@ -111,7 +89,6 @@ impl Rng {
         }
     }
 
-    /// Pick an index in `[0, len)`; returns `None` for an empty slice.
     pub fn choose_index(&mut self, len: usize) -> Option<usize> {
         if len == 0 {
             None
@@ -120,7 +97,6 @@ impl Rng {
         }
     }
 
-    /// In-place Fisher–Yates shuffle.
     pub fn shuffle<T>(&mut self, xs: &mut [T]) {
         for i in (1..xs.len()).rev() {
             let j = self.below(i as u64 + 1) as usize;

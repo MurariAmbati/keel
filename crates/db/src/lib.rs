@@ -1,27 +1,3 @@
-//! `keel-db` — the storage-backed database facade (P4/P5).
-//!
-//! Ties the SQL front end to real durable storage: a self-hosting catalog stored
-//! in KEEL's own heap (D12), heap-backed tables, and `CREATE`/`INSERT`/`SELECT`
-//! over the buffer pool. Every heap record is a table-id-prefixed tuple; table id
-//! 0 is the catalog itself, so reopening rebuilds the schema by scanning it.
-//!
-//! `SELECT` runs on one of two independent executors (§7.1): the streaming
-//! (Volcano) executor in [`exec`] for eligible single-table queries, and — as a
-//! fallback and the semantic oracle — the materializing reference engine. Both
-//! are exercised by the differential campaign.
-//!
-//! `CREATE INDEX` builds a durable B-tree (`keel-btree`) over a column keyed by
-//! the normalized-key codec (`keel-keys`), maintained on every `INSERT` and
-//! persisted in the index catalog (table id 1); a `WHERE col = literal` on an
-//! indexed column becomes a B-tree point-lookup instead of a full scan (D-DB-2).
-//!
-//! Durability comes in two modes. [`Database::open`] is checkpoint-durable: every
-//! mutating statement flushes and fsyncs the data file. [`Database::open_logged`]
-//! routes DML through a **logical statement WAL** ([`wal`]): each mutation is
-//! appended to a redo log and fsynced before it is applied, the data file is held
-//! under no-steal, and recovery replays the log — the SQL-level rung-1 property.
-//! See D-DB-1, D-EXEC-1, D-DB-2, D-WALDB-1.
-
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -42,27 +18,20 @@ use wal::StmtLog;
 
 pub use keel_sql::refengine::{ResultSet, Row};
 
-/// Table id 0 holds table-catalog records; id 1 holds index-catalog records;
-/// user tables start at 2.
 const CATALOG_TID: u16 = 0;
 const INDEX_TID: u16 = 1;
 const FIRST_USER_TID: u16 = 2;
 
-/// In-memory metadata for one secondary index (persisted as an index-catalog row).
 #[derive(Clone, Debug)]
 struct IndexMeta {
     name: String,
     table_id: u16,
     col_index: usize,
     col_type: ColumnType,
-    /// Current B-tree root (updated as the tree grows).
     root: u32,
-    /// RID of this index's catalog record, so its root can be rewritten in place.
     catalog_rid: Rid,
 }
 
-/// Index key = normalized column key ++ the 6-byte data RID (so duplicate column
-/// values stay distinct and a lookup is a prefix range).
 fn rid_bytes(rid: Rid) -> [u8; 6] {
     let mut b = [0u8; 6];
     b[0..4].copy_from_slice(&rid.page.to_le_bytes());
@@ -103,8 +72,6 @@ impl From<HeapError> for DbError {
         DbError::Heap(e)
     }
 }
-/// The pager seam reports the same three failures under a different name; fold them
-/// into the existing variant so the public error type is unchanged by the migration.
 impl From<keel_pager::PagerError> for DbError {
     fn from(e: keel_pager::PagerError) -> Self {
         DbError::Buffer(match e {
@@ -129,40 +96,20 @@ fn exec_err<T>(m: impl Into<String>) -> Result<T, DbError> {
 }
 type R<T> = Result<T, DbError>;
 
-/// A durable, SQL-speaking database over one data file.
 pub struct Database<P: RecoveryPager = BufferPool> {
     bp: P,
     catalog: RefCell<BTreeMap<String, (u16, Schema)>>,
     indexes: RefCell<Vec<IndexMeta>>,
     next_tid: Cell<u16>,
     index_lookups: Cell<u64>,
-    /// Number of queries served by the streaming hash-join executor (telemetry;
-    /// proves the fast path is live rather than silently falling back).
     join_streams: Cell<u64>,
-    /// Number of grouped/aggregated queries served by the streaming aggregate path.
     agg_streams: Cell<u64>,
-    /// Per-table statistics from `ANALYZE`, used for cost-based access-path
-    /// selection. Empty until `analyze` runs.
     stats: RefCell<HashMap<u16, keel_stats::TableStats>>,
-    /// When present, the database is in **logged** mode: every mutating statement
-    /// is appended to this redo log (and fsynced) before it is applied, and the
-    /// data file is held at its last checkpoint under no-steal. `None` = the
-    /// checkpoint-durable mode (each statement flushes the data file directly).
     log: Option<StmtLog>,
-    /// The buffered mutations of an open transaction (logged mode). `None` = no
-    /// transaction open (auto-commit).
     txn: RefCell<Option<Vec<String>>>,
-    /// Number of log records applied by the last `open_logged` recovery (telemetry:
-    /// after a `compact`, this is the snapshot + tail, not the full history).
     replayed: Cell<u64>,
 }
 
-/// A log record's kind is its first byte: an applied SQL `S`tatement, the `C`ommit
-/// marker that makes preceding statements durable, or the `B`egin/`E`nd markers
-/// bracketing a compaction snapshot (a minimal statement script that reconstructs
-/// the whole committed state — recovery replays from the last *complete* B…E and
-/// ignores everything before it, so the log's history is superseded without a
-/// non-atomic rewrite).
 const REC_STMT: u8 = b'S';
 const REC_COMMIT: u8 = b'C';
 const REC_SNAP_BEGIN: u8 = b'B';
@@ -171,7 +118,6 @@ const COMMIT_RECORD: &[u8] = &[REC_COMMIT];
 const SNAP_BEGIN_RECORD: &[u8] = &[REC_SNAP_BEGIN];
 const SNAP_END_RECORD: &[u8] = &[REC_SNAP_END];
 
-/// Encode one SQL statement as an `S`-record (kind byte then the SQL bytes).
 fn stmt_record(sql: &str) -> Vec<u8> {
     let mut r = Vec::with_capacity(1 + sql.len());
     r.push(REC_STMT);
@@ -179,7 +125,6 @@ fn stmt_record(sql: &str) -> Vec<u8> {
     r
 }
 
-/// A `Value` as a SQL literal (round-trippable through the parser).
 fn value_to_sql(v: &Value) -> String {
     match v {
         Value::Null => "NULL".to_string(),
@@ -208,12 +153,9 @@ fn type_to_sql(t: ColumnType) -> String {
     }
 }
 
-/// Below this estimated selectivity, an index scan is expected to beat a full
-/// scan (the design measures the real crossover; this is a sane default).
 const INDEX_CROSSOVER: f64 = 0.2;
 
 impl Database<BufferPool> {
-    /// Open (or create) a database over a data file (checkpoint-durable mode).
     pub fn open(file: Arc<dyn BlockFile>, frames: usize) -> R<Self> {
         let bp = BufferPool::open_default(file, frames)?;
         let db = Database {
@@ -233,16 +175,6 @@ impl Database<BufferPool> {
         Ok(db)
     }
 
-    /// Open (or create) a database in **logged** mode over a `(data, log)` pair.
-    ///
-    /// Mutating statements are appended to `log` and fsynced before they are
-    /// applied; the data file is held under no-steal (nothing is flushed to it
-    /// during the session), so the log is the sole durable record. On open, the
-    /// catalog is loaded from the data image and then the log tail is replayed —
-    /// with no durable checkpoint yet, the data image is empty and replay rebuilds
-    /// the whole committed state. Reconstruction is exact because statements are
-    /// deterministic. (Bounding the log with a torn-checkpoint-safe compaction —
-    /// the rung-2/3 step, needing page-LSN-gated redo — is future work.)
     pub fn open_logged(
         data: Arc<dyn BlockFile>,
         log: Arc<dyn BlockFile>,
@@ -270,10 +202,6 @@ impl Database<BufferPool> {
 }
 
 impl<P: RecoveryPager> Database<P> {
-    /// Open (or create) a database over an **already-built pager**, in
-    /// checkpoint-durable mode. This is the seam the concurrent `PageCache` enters
-    /// through: `Database::open` keeps constructing a `BufferPool` so every existing
-    /// caller is unaffected, while this constructor accepts either pool.
     pub fn with_pager(bp: P) -> R<Self> {
         let db = Database {
             bp,
@@ -292,13 +220,6 @@ impl<P: RecoveryPager> Database<P> {
         Ok(db)
     }
 
-    /// Replay the durable log after `load_catalog`. If a **compaction snapshot** (a
-    /// complete `B…E` bracket) is present, replay starts from the last one — its
-    /// statements reconstruct the whole committed state — and everything before it
-    /// is skipped as superseded; otherwise replay covers the full log. In either
-    /// case an incomplete compaction at the tail (a `B` with no matching `E`, e.g. a
-    /// crash mid-compact) is ignored, and post-snapshot statements apply as `S…C`
-    /// committed batches (a torn/uncommitted final batch is dropped).
     fn recover(&self) -> R<()> {
         let records = self
             .log
@@ -358,19 +279,10 @@ impl<P: RecoveryPager> Database<P> {
         Ok(())
     }
 
-    /// Number of log records applied by the last recovery (telemetry).
     pub fn replay_count(&self) -> u64 {
         self.replayed.get()
     }
 
-    /// **Compact the log** (logged mode): append a snapshot — a minimal statement
-    /// script that reconstructs the current committed state — bracketed by begin/end
-    /// markers. After it is durable, recovery replays only from this snapshot, so the
-    /// prior history is superseded (bounding recovery work) without a non-atomic
-    /// rewrite. It is torn-safe: the snapshot is only *used* once its closing `E`
-    /// marker is durable, so a crash mid-compact leaves the previous state intact.
-    /// (Physically reclaiming the now-dead prefix bytes needs file rewrite / the
-    /// page-LSN physical redo, and is deferred.)
     pub fn compact(&self) -> R<()> {
         let log = self
             .log
@@ -389,9 +301,6 @@ impl<P: RecoveryPager> Database<P> {
         Ok(())
     }
 
-    /// A minimal SQL script (CREATE TABLE + INSERTs + CREATE INDEX) that recreates
-    /// the current committed state, in table-creation order (so replay reassigns the
-    /// same table ids).
     fn snapshot_script(&self) -> R<Vec<String>> {
         let mut tables: Vec<(String, u16, Schema)> = self
             .catalog
@@ -453,7 +362,6 @@ impl<P: RecoveryPager> Database<P> {
         Ok(())
     }
 
-    /// Flush and fsync — durability point (until DML runs under the WAL at P5).
     pub fn checkpoint(&self) -> R<()> {
         self.bp.checkpoint()?;
         Ok(())
@@ -463,23 +371,18 @@ impl<P: RecoveryPager> Database<P> {
         self.catalog.borrow().keys().cloned().collect()
     }
 
-    /// Number of index point-lookups served so far (for tests/telemetry).
     pub fn index_lookups(&self) -> u64 {
         self.index_lookups.get()
     }
 
-    /// Number of queries served by the streaming hash-join executor.
     pub fn join_streams(&self) -> u64 {
         self.join_streams.get()
     }
 
-    /// Number of grouped/aggregated queries served by the streaming aggregate path.
     pub fn agg_streams(&self) -> u64 {
         self.agg_streams.get()
     }
 
-    /// Compute statistics for every table (`ANALYZE`), enabling cost-based
-    /// access-path selection.
     pub fn analyze(&self) -> R<()> {
         let tables: Vec<(u16, Schema)> = self.catalog.borrow().values().cloned().collect();
         for (tid, schema) in tables {
@@ -490,9 +393,6 @@ impl<P: RecoveryPager> Database<P> {
         Ok(())
     }
 
-    /// Estimate then measure the surviving-row cardinality of a single-table
-    /// query's WHERE, returning `(estimated, actual, q_error)` — the headline
-    /// optimizer metric (§6.4). Requires `analyze` to have run.
     pub fn q_error(&self, sql: &str) -> R<Option<(f64, f64, f64)>> {
         let stmt = parse_statement(sql)?;
         let keel_sql::Stmt::Select(q) = stmt else {
@@ -518,17 +418,6 @@ impl<P: RecoveryPager> Database<P> {
         Ok(Some((est, actual, keel_stats::q_error(est, actual))))
     }
 
-    /// Parse and execute one SQL statement. `SELECT` returns a `ResultSet`.
-    ///
-    /// In logged mode a mutating statement is appended to the redo log (and
-    /// fsynced) *before* it is applied — the log-before-data rule that makes it
-    /// crash-atomic. `BEGIN`/`COMMIT`/`ROLLBACK` bracket a **transaction**: a
-    /// transaction's mutations are buffered and applied atomically at `COMMIT`
-    /// (logged as one committed unit — a crash before the commit marker discards
-    /// the whole batch), while `ROLLBACK` discards the buffer untouched. (Reads
-    /// *inside* an open transaction see the pre-transaction state — the buffered
-    /// mutations land together at commit; this is the deferred-apply model.)
-    /// Outside logged mode `BEGIN`/`COMMIT`/`ROLLBACK` remain no-ops.
     pub fn execute(&self, sql: &str) -> R<Option<ResultSet>> {
         let stmt = parse_statement(sql)?;
 
@@ -579,9 +468,6 @@ impl<P: RecoveryPager> Database<P> {
         self.dispatch(stmt)
     }
 
-    /// Log `stmts` as one committed unit (each `S`-record then a `C` marker,
-    /// fsynced), then apply them in order. A crash before the `C` marker is durable
-    /// leaves the batch un-committed, so replay discards it — atomic all-or-nothing.
     fn commit_batch(&self, stmts: &[String]) -> R<()> {
         let log = self
             .log
@@ -599,9 +485,6 @@ impl<P: RecoveryPager> Database<P> {
         Ok(())
     }
 
-    /// Durability point after a mutation: in logged mode the statement is already
-    /// durable in the fsynced log and the data file stays under no-steal, so this
-    /// is a no-op; otherwise it flushes and fsyncs the data file.
     fn persist(&self) -> R<()> {
         if self.log.is_some() {
             Ok(())
@@ -610,8 +493,6 @@ impl<P: RecoveryPager> Database<P> {
         }
     }
 
-    /// Apply a parsed statement (no logging — used by `execute` after logging and
-    /// by log replay).
     fn dispatch(&self, stmt: Stmt) -> R<Option<ResultSet>> {
         match stmt {
             Stmt::CreateTable(ct) => {
@@ -647,10 +528,6 @@ impl<P: RecoveryPager> Database<P> {
         }
     }
 
-    /// `DROP TABLE t`: delete the table's data rows, its catalog record, and every
-    /// index catalog record for it, then forget it in memory. (Heap/B-tree pages
-    /// are tombstoned but not yet reclaimed — page deallocation is deferred; the
-    /// table is logically gone and stays gone across reopen.)
     fn drop_table(&self, name: &str) -> R<()> {
         let tid = match self.catalog.borrow().get(name) {
             Some((t, _)) => *t,
@@ -688,8 +565,6 @@ impl<P: RecoveryPager> Database<P> {
         self.persist()
     }
 
-    /// `DROP INDEX ix`: delete the index's catalog record and forget it. (Its
-    /// B-tree pages are not yet reclaimed — page deallocation is deferred.)
     fn drop_index(&self, name: &str) -> R<()> {
         let catalog_rid = match self.indexes.borrow().iter().find(|m| m.name == name) {
             Some(m) => m.catalog_rid,
@@ -700,10 +575,6 @@ impl<P: RecoveryPager> Database<P> {
         self.persist()
     }
 
-    /// `DELETE FROM t [WHERE pred]`: find matching rows by scanning the heap,
-    /// remove each with `heap.delete`, and drop their entries from every index on
-    /// the table. Returns the number of rows deleted. (Predicates may not contain
-    /// subqueries — the DML path evaluates them row-at-a-time via `eval_public`.)
     fn delete(&self, del: &keel_sql::Delete) -> R<usize> {
         let (tid, schema) = self
             .catalog
@@ -742,10 +613,6 @@ impl<P: RecoveryPager> Database<P> {
         Ok(victims.len())
     }
 
-    /// `UPDATE t SET c = e, ... [WHERE pred]`: for each matching row, evaluate the
-    /// right-hand sides against the *pre-update* row, coerce, enforce NOT NULL,
-    /// write back with `heap.update` (RID stays stable), and for any index whose
-    /// column value changed, replace its entry. Returns the number of rows updated.
     fn update(&self, upd: &keel_sql::Update) -> R<usize> {
         let (tid, schema) = self
             .catalog
@@ -811,7 +678,6 @@ impl<P: RecoveryPager> Database<P> {
         Ok(work.len())
     }
 
-    /// Remove `row`'s entry (keyed by its stable RID) from every index on `tid`.
     fn remove_index_entries(&self, tid: u16, row: &Row, rid: Rid, heap: &HeapFile<'_, P>) -> R<()> {
         let mut idxs = self.indexes.borrow_mut();
         for m in idxs.iter_mut().filter(|m| m.table_id == tid) {
@@ -827,8 +693,6 @@ impl<P: RecoveryPager> Database<P> {
         Ok(())
     }
 
-    /// For each index on `tid` whose column value changed between `old` and `new`,
-    /// replace the old key with the new one (RID unchanged).
     fn update_index_entries(
         &self,
         tid: u16,
@@ -982,8 +846,6 @@ impl<P: RecoveryPager> Database<P> {
         self.persist()
     }
 
-    /// Run a `SELECT` given as an AST (bypasses parsing) — handy for generated
-    /// queries and the differential campaign.
     pub fn query(&self, q: &keel_sql::Select) -> R<ResultSet> {
         self.select(q)
     }
@@ -1022,9 +884,6 @@ impl<P: RecoveryPager> Database<P> {
         Ok(rs)
     }
 
-    /// Build an in-memory reference database mirroring the committed on-heap state
-    /// (every user table's schema + rows). The oracle for the fallback path, and
-    /// the base for a transaction's read-your-writes overlay.
     fn materialized_memdb(&self) -> R<MemDb> {
         let tid_schema: HashMap<u16, (String, Schema)> = self
             .catalog
@@ -1056,10 +915,6 @@ impl<P: RecoveryPager> Database<P> {
         Ok(mem)
     }
 
-    /// Read-your-writes for a `SELECT` inside an open transaction: run it against
-    /// the committed state **plus** the transaction's own buffered mutations,
-    /// applied to a throwaway reference database. The durable state is untouched
-    /// (so rollback stays trivial); this is transaction-local visibility only.
     fn select_with_overlay(&self, q: &keel_sql::Select, buffered: &[String]) -> R<ResultSet> {
         let mut mem = self.materialized_memdb()?;
         for sql in buffered {
@@ -1069,9 +924,6 @@ impl<P: RecoveryPager> Database<P> {
             .ok_or_else(|| DbError::Exec("select produced no result".into()))
     }
 
-    /// The cost-based join order the planner chooses for a join query, as table
-    /// aliases (a mini-`EXPLAIN`). `Ok(None)` if the query isn't a reorderable join
-    /// (it would fold in FROM order). Requires the tables to exist.
     pub fn join_order(&self, sql: &str) -> R<Option<Vec<String>>> {
         let stmt = parse_statement(sql)?;
         let Stmt::Select(q) = stmt else {
@@ -1099,9 +951,6 @@ impl<P: RecoveryPager> Database<P> {
             .map(|idxs| idxs.into_iter().map(|i| tables[i].0.clone()).collect()))
     }
 
-    /// Gather every FROM table's `(alias, schema, rows)` in FROM order and try the
-    /// streaming hash-join executor. `Ok(None)` means it declined (unknown table
-    /// or a query shape it can't prove) and the caller should materialize.
     fn try_join_stream(
         &self,
         q: &keel_sql::Select,
@@ -1132,8 +981,6 @@ impl<P: RecoveryPager> Database<P> {
         }
     }
 
-    /// If the WHERE has an equality on an indexed column, fetch just the matching
-    /// rows via the B-tree; else `None` (caller full-scans).
     fn index_rows(&self, tid: u16, schema: &Schema, q: &keel_sql::Select) -> R<Option<Vec<Row>>> {
         let Some(filter) = &q.filter else {
             return Ok(None);
@@ -1177,9 +1024,6 @@ impl<P: RecoveryPager> Database<P> {
         Ok(Some(rows))
     }
 
-    /// Find an index-usable comparison (`= < <= > >=`) on an indexed column of
-    /// `tid`, preferring an equality. Returns the index, normalized op, and the
-    /// coerced literal.
     fn find_indexed_pred(
         &self,
         tid: u16,
@@ -1215,7 +1059,6 @@ impl<P: RecoveryPager> Database<P> {
         best
     }
 
-    /// Scan and decode every row of one table from the heap.
     fn scan_table(&self, tid: u16, schema: &Schema) -> R<Vec<Row>> {
         let heap = HeapFile::open(&self.bp)?;
         let mut rows = Vec::new();
@@ -1233,8 +1076,6 @@ impl<P: RecoveryPager> Database<P> {
     }
 }
 
-/// Does this statement change durable state (and so need logging)? SELECT and the
-/// transaction-control no-ops do not.
 fn is_mutating(stmt: &Stmt) -> bool {
     matches!(
         stmt,
@@ -1248,7 +1089,6 @@ fn is_mutating(stmt: &Stmt) -> bool {
     )
 }
 
-/// Column bindings for a single-table DML scope: `(table_alias, column_name)`.
 fn scan_cols(table: &str, schema: &Schema) -> Vec<(String, String)> {
     schema
         .columns
@@ -1257,15 +1097,11 @@ fn scan_cols(table: &str, schema: &Schema) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Evaluate a WHERE predicate over one row; a row is affected only when the
-/// predicate is TRUE (NULL and FALSE both spare it), matching SELECT's rule.
 fn matches_pred(pred: &keel_sql::Expr, cols: &[(String, String)], row: &Row) -> R<bool> {
     let v = keel_sql::refengine::eval_public(pred, cols, row).map_err(DbError::from)?;
     Ok(matches!(v, Value::Bool(true)))
 }
 
-/// Reject subqueries in DML predicates/assignments: the row-at-a-time DML path
-/// has no correlated-subquery evaluator (the materializing SELECT path does).
 fn require_no_subquery(e: &keel_sql::Expr) -> R<()> {
     if keel_sql::refengine::is_subquery_free(e) {
         Ok(())
@@ -1274,7 +1110,6 @@ fn require_no_subquery(e: &keel_sql::Expr) -> R<()> {
     }
 }
 
-/// Rewrite an index's catalog record in place after its root moves.
 fn write_index_catalog<P: keel_pager::Pager>(heap: &HeapFile<'_, P>, m: &IndexMeta) -> R<()> {
     let mut crec = INDEX_TID.to_le_bytes().to_vec();
     crec.extend(serialize_index(
@@ -1303,8 +1138,6 @@ fn collect_conjuncts<'a>(e: &'a keel_sql::Expr, out: &mut Vec<&'a keel_sql::Expr
     }
 }
 
-/// A comparison between a column and a literal, if the conjunct is one. The op is
-/// normalized so it reads `column <op> literal` (flipping `literal <op> column`).
 fn cmp_col_lit(e: &keel_sql::Expr) -> Option<(String, keel_sql::BinOp, Value)> {
     use keel_sql::{BinOp, Expr};
     let Expr::Binary { op, left, right } = e else {
@@ -1337,9 +1170,6 @@ fn flip_op(op: keel_sql::BinOp) -> keel_sql::BinOp {
     }
 }
 
-/// The B-tree key range `[lo, hi)` for `col <op> v`, where `enc = encode_value(v)`
-/// and keys are `enc ++ rid`. Bounds may over-fetch (the streaming filter
-/// re-applies the exact predicate), never under-fetch.
 fn index_bounds(op: keel_sql::BinOp, enc: &[u8]) -> (Vec<u8>, Option<Vec<u8>>) {
     use keel_sql::BinOp::*;
     let mut past = enc.to_vec();
@@ -1965,21 +1795,12 @@ mod concurrency {
     use std::sync::Mutex;
     use std::thread;
 
-    /// Compile-time guard: `Database` is `Send`, so it can move to another thread or
-    /// live behind a `Mutex` (the buffer's `WalSync` seam is `Send`, and the `wal`
-    /// crate's `TxnStore` uses `Arc/Mutex`). If this stops compiling, thread-safety
-    /// regressed.
     #[test]
     fn database_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<Database>();
     }
 
-    /// Concurrent writers through one shared handle: eight threads each insert a
-    /// disjoint block of rows (auto-commit — every `execute` is atomic under the
-    /// lock). All 800 rows must land exactly once, none lost or duplicated, which
-    /// establishes the engine is correctly usable from many threads (coarse-locked;
-    /// fine-grained latching is the next phase).
     #[test]
     fn concurrent_writers_via_shared_handle() {
         let disk = Arc::new(MemDisk::new()) as Arc<dyn BlockFile>;
@@ -2015,11 +1836,6 @@ mod concurrency {
         }
     }
 
-    /// The whole SQL stack under real concurrent threads: bank transfers over an
-    /// indexed table. Each transfer holds the handle lock for the read-modify-write
-    /// (its atomicity), so it exercises parse → indexed lookup → UPDATE → index
-    /// maintenance from many threads. Money conservation is the invariant — any
-    /// corruption or lost update under concurrency breaks it.
     #[test]
     fn concurrent_sql_transfers_conserve_money() {
         const ACCOUNTS: i64 = 8;

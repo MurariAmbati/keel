@@ -1,12 +1,3 @@
-//! `keel` — the shell over the engine.
-//!
-//! `keel demo` exercises the storage stack directly (heap over buffer pool over a
-//! real file, checkpointed, reopened, scanned, `dbcheck`ed). `keel sql <file>`
-//! runs SQL from stdin against a durable (checkpoint-mode) database and prints
-//! result tables. `keel sqllog <data> <log>` runs against the **logical WAL**
-//! (durability via the redo log), honoring `.compact` and `.analyze` meta-commands.
-//! `keel check <file>` validates a data file.
-
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -152,8 +143,6 @@ fn main() -> ExitCode {
     }
 }
 
-/// Run SQL statements from stdin against a durable database at `path`, printing
-/// each SELECT as a formatted table. Statements are separated by `;`.
 fn sql_repl(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Read;
     let file: Arc<dyn BlockFile> = Arc::new(OsFile::open(path)?);
@@ -175,10 +164,6 @@ fn sql_repl(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Run SQL against a **logged-mode** database (durability via the redo log at
-/// `log`, over the data file at `data`). Recovery replays the log on open; the
-/// meta-commands `.compact` (snapshot the log to bound recovery) and `.analyze`
-/// (compute statistics) are honored alongside SQL statements.
 fn sql_logged(data: &str, log: &str) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Read;
     let data_file: Arc<dyn BlockFile> = Arc::new(OsFile::open(data)?);

@@ -1,18 +1,3 @@
-//! The SQL crash campaign, run against the **concurrent** page cache.
-//!
-//! The engine-swap arc (D-PAGER-1…5c) proved `Database<PageCache>` and
-//! `Database<BufferPool>` agree, and that the concurrent path survives a clean
-//! checkpoint and reopen. But every existing crash campaign runs on `BufferPool`, so
-//! the concurrent path had never faced the fault-injecting disk — and this project's
-//! standing rule is that a durability claim is *earned against an adversary, not
-//! asserted*. Equivalence under benign conditions is not the same claim.
-//!
-//! So this is the same shape as `sql_crash.rs`, pointed at `Database<PageCache>`:
-//! build a durable SQL state (each statement is its own barrier), cut power at a
-//! sync boundary, reopen over the durable image, and require the catalog, rows, and
-//! secondary index to all survive — plus `dbcheck` to report the file structurally
-//! clean afterwards.
-
 use keel_cbuffer::{NoWal, PageCache, PageFormat};
 use keel_db::Database;
 use keel_dbcheck::check_file;

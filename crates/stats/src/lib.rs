@@ -1,17 +1,6 @@
-//! Statistics and cardinality estimation (§6.3–6.4).
-//!
-//! `analyze` samples a table into per-column statistics: null fraction, distinct
-//! count (via **HyperLogLog**), min/max, and an equi-depth **histogram** over the
-//! numeric columns. `estimate_selectivity` turns a WHERE predicate into an
-//! expected surviving fraction (histogram interpolation for ranges, `1/NDV` for
-//! equality, independence across `AND`). The headline optimizer number is the
-//! **q-error** — `max(est/act, act/est)` per query — which is what makes "how
-//! good is my estimator" quantitative (§6.4, the JOB-paper worldview).
-
 use keel_sql::{BinOp, Expr, UnOp};
 use keel_types::{Schema, Value};
 
-/// A small HyperLogLog for estimating the number of distinct values.
 #[derive(Clone, Debug)]
 pub struct Hll {
     registers: Vec<u8>,
@@ -91,7 +80,6 @@ fn hash_value(v: &Value) -> u64 {
     z ^ (z >> 31)
 }
 
-/// The numeric value of `v` for histograms/min/max, or `None` for non-numeric.
 fn as_f64(v: &Value) -> Option<f64> {
     match v {
         Value::Int(i) => Some(*i as f64),
@@ -110,8 +98,6 @@ pub struct ColumnStats {
     pub ndv: u64,
     pub min: Option<f64>,
     pub max: Option<f64>,
-    /// Equi-depth boundaries (`HIST_BUCKETS + 1` of them) over non-null numeric
-    /// values; `None` for non-numeric columns.
     pub hist: Option<Vec<f64>>,
 }
 
@@ -121,8 +107,6 @@ pub struct TableStats {
     pub columns: Vec<ColumnStats>,
 }
 
-/// Compute statistics over a table's rows (a full `ANALYZE`; sampling is a later
-/// refinement).
 pub fn analyze(schema: &Schema, rows: &[Vec<Value>]) -> TableStats {
     let ncols = schema.columns.len();
     let mut columns = Vec::with_capacity(ncols);
@@ -165,7 +149,6 @@ pub fn analyze(schema: &Schema, rows: &[Vec<Value>]) -> TableStats {
     }
 }
 
-/// Equi-depth histogram boundaries over sorted numeric values.
 fn equi_depth(sorted: &[f64], buckets: usize) -> Vec<f64> {
     let n = sorted.len();
     let b = buckets.min(n.max(1));
@@ -177,8 +160,6 @@ fn equi_depth(sorted: &[f64], buckets: usize) -> Vec<f64> {
     bounds
 }
 
-/// Fraction of the (non-null numeric) values strictly below `v`, via bucket
-/// interpolation. In `[0, 1]`.
 fn frac_below(hist: &[f64], v: f64) -> f64 {
     if hist.len() < 2 {
         return if v > hist.first().copied().unwrap_or(0.0) {
@@ -208,9 +189,6 @@ fn frac_below(hist: &[f64], v: f64) -> f64 {
 const DEFAULT_RANGE: f64 = 0.33;
 const DEFAULT_OTHER: f64 = 0.5;
 
-/// Estimate the fraction of rows a predicate keeps (as a WHERE filter), in
-/// `[0, 1]`. Uses column stats for comparisons on `column <op> literal`,
-/// independence for `AND`, inclusion–exclusion for `OR`.
 pub fn estimate_selectivity(pred: &Expr, schema: &Schema, stats: &TableStats) -> f64 {
     let s = estimate(pred, schema, stats);
     s.clamp(0.0, 1.0)
@@ -337,18 +315,12 @@ fn flip(op: BinOp) -> BinOp {
     }
 }
 
-/// q-error between an estimate and the actual (both smoothed by 1 to avoid
-/// division by zero): `max((est+1)/(act+1), (act+1)/(est+1))`, always `>= 1`.
 pub fn q_error(estimated: f64, actual: f64) -> f64 {
     let e = estimated.max(0.0) + 1.0;
     let a = actual.max(0.0) + 1.0;
     (e / a).max(a / e)
 }
 
-/// Access-path advice: whether an index scan is expected to beat a full scan for
-/// the given selectivity, under a simple cost model (an index scan touches
-/// `sel * rows` tuples plus per-tuple random-fetch overhead; a seq scan touches
-/// every page). Below the crossover selectivity, prefer the index.
 pub fn prefer_index_scan(selectivity: f64, crossover: f64) -> bool {
     selectivity <= crossover
 }

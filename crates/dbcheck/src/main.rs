@@ -1,5 +1,3 @@
-//! `dbcheck <file>` — validate a KEEL data file and print a report.
-
 use std::process::ExitCode;
 
 use keel_dbcheck::check_file;

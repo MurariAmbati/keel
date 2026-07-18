@@ -1,23 +1,3 @@
-//! `dbcheck` — the offline validator of every invariant the engine claims (D12).
-//!
-//! It is the crash campaign's referee: after recovery, `dbcheck` decides whether
-//! the database is actually well-formed. The rule (§7.5) is that every invariant
-//! the system relies on gets a `dbcheck` rule the same week it's introduced, so
-//! the tool grows monotonically with the engine. The P1 rule set:
-//!
-//!   * **Checksums** — every page's stored CRC matches its body (a mismatch is a
-//!     torn or rotted page).
-//!   * **Page structure** — header fields are self-consistent and no slot points
-//!     outside the tuple heap.
-//!   * **Heap record tags** — every record is a valid Tuple / Forward /
-//!     ForwardTarget.
-//!   * **Forward integrity** — every stub points at a real ForwardTarget, and
-//!     every ForwardTarget is pointed at by exactly one stub (no dangling
-//!     forwards, no orphaned or doubly-referenced targets).
-//!
-//! Later phases add B-tree order/balance/sibling rules and MVCC version-chain
-//! rules here, same-week as those subsystems land.
-
 use std::collections::HashMap;
 use std::io;
 
@@ -25,41 +5,17 @@ use keel_heap::{classify_record, RecordKind, Rid};
 use keel_page::{PageType, SlottedPage, PAGE_SIZE};
 use keel_vfs::BlockFile;
 
-/// A single invariant violation found by `dbcheck`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Violation {
-    BadChecksum {
-        page: u32,
-    },
-    BadStructure {
-        page: u32,
-        why: String,
-    },
-    BadRecordTag {
-        rid: Rid,
-        tag: u8,
-    },
-    /// A forward stub points at a slot that isn't a live ForwardTarget.
-    DanglingForward {
-        stub: Rid,
-        target: Rid,
-    },
-    /// A ForwardTarget that no stub points to (leaked space / lost tuple).
-    OrphanTarget {
-        target: Rid,
-    },
-    /// A ForwardTarget referenced by more than one stub.
-    DoublyReferencedTarget {
-        target: Rid,
-        stubs: Vec<Rid>,
-    },
-    /// The file length is not a whole number of pages.
-    RaggedFile {
-        bytes: u64,
-    },
+    BadChecksum { page: u32 },
+    BadStructure { page: u32, why: String },
+    BadRecordTag { rid: Rid, tag: u8 },
+    DanglingForward { stub: Rid, target: Rid },
+    OrphanTarget { target: Rid },
+    DoublyReferencedTarget { target: Rid, stubs: Vec<Rid> },
+    RaggedFile { bytes: u64 },
 }
 
-/// The result of a check run: counts plus any violations.
 #[derive(Clone, Debug, Default)]
 pub struct CheckReport {
     pub pages: u32,
@@ -76,8 +32,6 @@ impl CheckReport {
     }
 }
 
-/// Validate an entire data file. Never trusts a page whose checksum fails — such
-/// a page is reported and skipped for structural checks.
 pub fn check_file(file: &dyn BlockFile) -> io::Result<CheckReport> {
     let size = file.size()?;
     let mut report = CheckReport::default();

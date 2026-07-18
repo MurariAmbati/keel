@@ -1,9 +1,5 @@
-//! Hand-written SQL lexer (§6.1). Case-insensitive keywords/identifiers (folded
-//! to lowercase), `--` line comments, `'...'` strings with `''` escaping.
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tok {
-    /// A lowercased identifier or keyword; the parser decides which.
     Word(String),
     Int(i64),
     Float(f64),
@@ -44,7 +40,6 @@ impl std::fmt::Display for LexError {
     }
 }
 
-/// Tokenize `src` into a stream ending in `Eof`.
 pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
     let b = src.as_bytes();
     let mut i = 0;

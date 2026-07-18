@@ -1,22 +1,3 @@
-//! A logical statement redo log — SQL-level crash recovery, the rung-1 analog.
-//!
-//! The page-level WAL (`keel-wal`) logs physical byte changes; this logs whole SQL
-//! *statements*. Under no-steal (data pages never leave the buffer except at an
-//! explicit checkpoint), the log is the sole durable record: every mutating
-//! statement is appended and fsynced **before** it is applied (log-before-data,
-//! force), so a power loss can lose at most a statement whose fsync had not
-//! returned. Recovery re-executes the logged statements in order onto the loaded
-//! data image — which, with no intervening durable checkpoint, is empty — and the
-//! committed state is reconstructed exactly, because KEEL's statements are
-//! deterministic. This is precisely the property the bank-accounts rung-1 campaign
-//! proved physically, now at the query surface.
-//!
-//! Frame: `[MAGIC u32][len u32][crc32(bytes) u32][bytes]`, little-endian. Replay
-//! reads complete, checksum-valid frames from the start and stops at the first
-//! torn or incomplete one, so a half-written tail is dropped atomically. Because
-//! every append fsyncs before returning, a committed statement is never the torn
-//! tail.
-
 use std::cell::Cell;
 use std::sync::Arc;
 
@@ -25,10 +6,8 @@ use keel_vfs::BlockFile;
 const LOG_MAGIC: u32 = 0x4B4C_4F47;
 const HEADER: usize = 12;
 
-/// An append-only, fsync-per-record log of SQL statement bytes over a `BlockFile`.
 pub(crate) struct StmtLog {
     file: Arc<dyn BlockFile>,
-    /// Byte offset of the next append (just past the last valid record).
     end: Cell<u64>,
 }
 
@@ -40,7 +19,6 @@ impl StmtLog {
         }
     }
 
-    /// Append one statement and fsync it (log-before-data / force durability).
     pub fn append(&self, sql: &[u8]) -> std::io::Result<()> {
         let mut buf = Vec::with_capacity(HEADER + sql.len());
         buf.extend_from_slice(&LOG_MAGIC.to_le_bytes());
@@ -54,9 +32,6 @@ impl StmtLog {
         Ok(())
     }
 
-    /// Every complete, checksum-valid record from the start, stopping at the first
-    /// torn/incomplete/bad-magic frame (a torn tail is dropped). Leaves the append
-    /// cursor just past the last valid record, so appends resume cleanly.
     pub fn replay(&self) -> std::io::Result<Vec<Vec<u8>>> {
         let size = self.file.size()? as usize;
         let mut all = vec![0u8; size];

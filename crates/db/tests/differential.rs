@@ -1,10 +1,3 @@
-//! Differential test (§7.1): the storage-backed `Database` must return exactly
-//! what the in-memory reference engine returns for the same data and queries.
-//! This validates the storage roundtrip — record encode/decode, the self-hosting
-//! catalog, and the heap scan — against the trusted semantic oracle.
-//!
-//! Replays from `seed`.
-
 use std::sync::Arc;
 
 use keel_db::Database;
@@ -93,10 +86,6 @@ fn storage_matches_reference_engine() {
     }
 }
 
-/// Two independent engines, random predicates: the storage engine's **streaming
-/// (Volcano) executor** vs the **reference engine**, over random NULL-heavy
-/// predicates (§7.1). `SELECT * FROM t WHERE <p> ORDER BY id` is streaming-
-/// eligible, so this directly differentials the two executors.
 #[test]
 fn streaming_executor_matches_reference_engine() {
     let cols: Vec<(String, ColumnType)> = vec![

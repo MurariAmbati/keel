@@ -1,9 +1,3 @@
-//! Recursive-descent parser over the freeze grammar (§6.1, D10).
-//!
-//! Precedence (lowest→highest): `OR`, `AND`, `NOT`, comparisons (`= <> < <= > >=`,
-//! `IS [NOT] NULL`, `[NOT] IN`), additive (`+ -`), multiplicative (`* /`), unary
-//! `-`, then atoms (literals, columns, `(...)`, `CASE`, aggregates, subqueries).
-
 use keel_types::{ColumnType, Value};
 
 use crate::ast::*;
@@ -38,7 +32,6 @@ struct Parser {
     i: usize,
 }
 
-/// Parse a single statement (an optional trailing `;` is allowed).
 pub fn parse_statement(src: &str) -> PResult<Stmt> {
     let mut p = Parser {
         toks: lex(src)?,
@@ -52,7 +45,6 @@ pub fn parse_statement(src: &str) -> PResult<Stmt> {
     Ok(s)
 }
 
-/// Parse a bare expression (handy for tests and the query generator).
 pub fn parse_expr(src: &str) -> PResult<Expr> {
     let mut p = Parser {
         toks: lex(src)?,
@@ -108,7 +100,6 @@ impl Parser {
             self.err(format!("expected {t:?}, found {:?}", self.peek()))
         }
     }
-    /// True and consumes if the next token is the keyword `kw`.
     fn eat_kw(&mut self, kw: &str) -> bool {
         if let Tok::Word(w) = self.peek() {
             if w == kw {
@@ -735,8 +726,6 @@ impl Parser {
     }
 }
 
-/// Reserved words that can't be bare identifiers. Kept deliberately small — SQL's
-/// giant reserved list isn't needed for the freeze set.
 fn is_reserved(w: &str) -> bool {
     matches!(
         w,

@@ -1,40 +1,16 @@
-//! The B+-tree — normalized keys to RIDs, over the buffer pool (§3, D8).
-//!
-//! Internal nodes hold separator keys and child page ids; leaves hold
-//! `key -> RID` entries plus left/right sibling links for range scans. Keys are
-//! opaque `memcmp`-comparable byte strings (`keel_keys`, D9), so the tree is
-//! entirely type-oblivious — it never inspects a key beyond `Ord` on bytes.
-//!
-//! **P1/P2 simplification, recorded:** a node is (de)serialized whole on every
-//! access — `load` parses the page into a `Node`, `store` writes it back. That
-//! is O(node) per operation rather than in-place binary search over a slotted
-//! directory, and it is chosen for obvious correctness first (§8.3 ethos); the
-//! in-place slotted-node layout is a later, measured optimization. Splits still
-//! happen at the byte midpoint (not entry count), since keys vary in length.
-//!
-//! Deletes are **lazy** (§3.2): tombstone the entry, tolerate underflow. Merge /
-//! redistribute is a correctness-equivalent optimization for later; `check`
-//! tracks occupancy so the deferral is visible, not hidden. Latching and the
-//! ARIES nested-top-action logging of splits arrive at P7/P3 respectively; the
-//! single-threaded structure here is the trusted base they build on (D3).
-
 use keel_buffer::{BufferError, BufferPool, PageId};
 use keel_heap::Rid;
 use keel_page::{raw, PageType};
 use keel_pager::Pager;
 
-/// Sentinel for "no sibling / no page".
 pub const NIL: PageId = u32::MAX;
 
 const RID_LEN: usize = 6;
 
-/// Errors from B-tree operations.
 #[derive(Debug)]
 pub enum BtreeError {
     Buffer(BufferError),
-    /// A page held neither a leaf nor an internal node.
     BadNode(PageId),
-    /// A single entry is larger than a node can hold (needs overflow pages).
     KeyTooLarge,
 }
 
@@ -53,8 +29,6 @@ impl From<BufferError> for BtreeError {
         BtreeError::Buffer(e)
     }
 }
-/// The pager seam reports the same three failures under a different name; fold them
-/// into the existing variant so the public error type is unchanged by the migration.
 impl From<keel_pager::PagerError> for BtreeError {
     fn from(e: keel_pager::PagerError) -> Self {
         BtreeError::Buffer(match e {
@@ -177,8 +151,6 @@ fn write_internal(body: &mut [u8], node: &Internal) {
 }
 
 impl Internal {
-    /// The child index a key descends into: the rightmost child whose separator
-    /// is `<= key` (separator = min key of the right subtree).
     fn child_index(&self, key: &[u8]) -> usize {
         let mut i = 0;
         while i < self.keys.len() && key >= self.keys[i].as_slice() {
@@ -188,8 +160,6 @@ impl Internal {
     }
 }
 
-/// Split a run of item sizes at the byte midpoint; returns an index in
-/// `[1, n-1]` so both halves are non-empty.
 fn split_at_bytes(sizes: impl Iterator<Item = usize>, n: usize) -> usize {
     let sizes: Vec<usize> = sizes.collect();
     let total: usize = sizes.iter().sum();
@@ -203,12 +173,6 @@ fn split_at_bytes(sizes: impl Iterator<Item = usize>, n: usize) -> usize {
     (n / 2).clamp(1, n - 1)
 }
 
-/// A B+-tree index. In the standalone layout, page 0 is a meta page holding the
-/// root page id and the tree lives from page 1. In the *rooted* layout (`meta =
-/// None`), the tree owns no meta page — its node pages are allocated in a shared
-/// pool and the caller persists the root id (returned by [`BTree::root`]),
-/// re-supplying it via [`BTree::open_rooted`]. That is how the storage engine
-/// keeps many indexes in one file alongside the heap.
 pub struct BTree<'a, P: Pager = BufferPool> {
     bp: &'a P,
     root: std::cell::Cell<PageId>,
@@ -216,7 +180,6 @@ pub struct BTree<'a, P: Pager = BufferPool> {
 }
 
 impl<'a, P: Pager> BTree<'a, P> {
-    /// Create a new, empty tree on a fresh (empty) pool (page 0 = meta).
     pub fn create(bp: &'a P) -> Result<Self> {
         assert_eq!(
             Pager::page_count(bp),
@@ -242,7 +205,6 @@ impl<'a, P: Pager> BTree<'a, P> {
         Ok(tree)
     }
 
-    /// Reopen a standalone tree, reading the root from the meta page.
     pub fn open(bp: &'a P) -> Result<Self> {
         let root = bp.with_page(0, |b| raw::extra(b) as u32)?;
         Ok(BTree {
@@ -252,8 +214,6 @@ impl<'a, P: Pager> BTree<'a, P> {
         })
     }
 
-    /// Create an empty **rooted** tree: allocates a root leaf in the shared pool
-    /// and owns no meta page. The caller must persist [`BTree::root`].
     pub fn create_rooted(bp: &'a P) -> Result<Self> {
         let root = alloc(bp, PageType::BTreeLeaf)?;
         let tree = BTree {
@@ -272,7 +232,6 @@ impl<'a, P: Pager> BTree<'a, P> {
         Ok(tree)
     }
 
-    /// Reopen a **rooted** tree from a caller-supplied root page id.
     pub fn open_rooted(bp: &'a P, root: PageId) -> Self {
         BTree {
             bp,
@@ -336,7 +295,6 @@ impl<'a, P: Pager> BTree<'a, P> {
         Ok(())
     }
 
-    /// Look up a key.
     pub fn get(&self, key: &[u8]) -> Result<Option<Rid>> {
         let mut pid = self.root.get();
         loop {
@@ -353,8 +311,6 @@ impl<'a, P: Pager> BTree<'a, P> {
         }
     }
 
-    /// Insert or replace `key -> rid`. Splits propagate up; the root grows when
-    /// it splits.
     pub fn insert(&self, key: &[u8], rid: Rid) -> Result<()> {
         if let Some((sep, right_pid)) = self.insert_rec(self.root.get(), key, rid)? {
             let old_root = self.root.get();
@@ -451,7 +407,6 @@ impl<'a, P: Pager> BTree<'a, P> {
         }
     }
 
-    /// Delete a key (lazy: tolerate underflow). Returns whether it existed.
     pub fn delete(&self, key: &[u8]) -> Result<bool> {
         let mut pid = self.root.get();
         loop {
@@ -494,7 +449,6 @@ impl<'a, P: Pager> BTree<'a, P> {
         }
     }
 
-    /// Range scan `[lo, hi)` (`hi = None` is unbounded), in key order.
     pub fn range(&self, lo: &[u8], hi: Option<&[u8]>) -> Result<Vec<(Vec<u8>, Rid)>> {
         let mut out = Vec::new();
         let mut cur = self.find_leaf(lo)?;
@@ -516,7 +470,6 @@ impl<'a, P: Pager> BTree<'a, P> {
         Ok(out)
     }
 
-    /// Every entry in key order (via the leftmost leaf + sibling chain).
     pub fn scan_all(&self) -> Result<Vec<(Vec<u8>, Rid)>> {
         let mut out = Vec::new();
         let mut cur = self.leftmost_leaf()?;
@@ -528,8 +481,6 @@ impl<'a, P: Pager> BTree<'a, P> {
         Ok(out)
     }
 
-    /// Validate every structural invariant the tree claims. The referee for the
-    /// B-tree, callable from tests and (later) `dbcheck`.
     pub fn check(&self) -> Result<CheckReport> {
         let mut report = CheckReport::default();
         let mut leaf_depths = Vec::new();
@@ -676,13 +627,10 @@ fn in_bounds(k: &[u8], low: Option<&[u8]>, high: Option<&[u8]>) -> bool {
     low.map(|l| k >= l).unwrap_or(true) && high.map(|h| k < h).unwrap_or(true)
 }
 
-/// Allocate a fresh node page and return its id (the pin is released; the caller
-/// stores content via `store_*`).
 fn alloc<P: Pager>(bp: &P, pt: PageType) -> Result<PageId> {
     Ok(bp.alloc_raw(pt)?)
 }
 
-/// Result of `BTree::check`.
 #[derive(Clone, Debug, Default)]
 pub struct CheckReport {
     pub nodes: u64,

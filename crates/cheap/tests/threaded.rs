@@ -1,11 +1,3 @@
-//! Concurrent insert race: many threads insert distinct, self-checking records at
-//! once through a small cache (so allocations constantly evict and flush). Every
-//! record must land exactly once — no lost insert, no two inserts colliding on one
-//! RID, no torn page — and the whole set must survive a checkpoint and reopen.
-//!
-//! Each record carries its global id twice; a scan that ever sees the two halves
-//! disagree has caught a torn write, and a repeated id has caught a collision.
-
 use keel_cbuffer::PageCache;
 use keel_cheap::{Heap, Rid};
 use keel_vfs::{BlockFile, MemDisk};

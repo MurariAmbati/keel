@@ -1,22 +1,3 @@
-//! A durable, concurrent hash-bucket key→value store over
-//! [`cbuffer::PageCache`] — the reference for how a real heap or B-tree will use
-//! the concurrent buffer.
-//!
-//! Each bucket is one page; a `put`/`get`/`update` on a bucket runs under that
-//! page's reader/writer latch (via `cbuffer`'s `PageRef`), so the whole store
-//! inherits the buffer's per-page concurrency, its `checkpoint` durability, and
-//! its crash-campaign guarantees for free. That is the point: the concurrency and
-//! durability were proven once, in `cbuffer`, and a data structure layered on top
-//! composes them rather than re-deriving them. `update` holds the bucket's write
-//! latch across the read-modify-write, so concurrent updates to the same key can
-//! never lose an increment.
-//!
-//! Every bucket page carries a CRC over its payload, so a torn page (from a crash
-//! mid-write) is *detected*, never silently read as valid data. Keys and values
-//! are `u64` and a bucket holds a flat, unsorted array — this demonstrates the
-//! *integration pattern*, not the engine's real record layout (that is the heap's
-//! job). Overflow is an honest error, never a silent drop.
-
 use std::sync::Arc;
 
 use keel_cbuffer::{CacheError, PageCache};
@@ -29,15 +10,12 @@ pub type Val = u64;
 const HEADER: usize = 4;
 const SLOT: usize = 16;
 const CRC_AT: usize = PAGE_SIZE - 4;
-/// Entries per bucket page.
 pub const BUCKET_CAP: usize = (CRC_AT - HEADER) / SLOT;
 
 #[derive(Debug)]
 pub enum KvError {
     Cache(CacheError),
-    /// A bucket page is full — the store's honest capacity signal.
     BucketFull(u32),
-    /// A bucket page failed its checksum — a torn page from a crash.
     Corrupt(u32),
 }
 impl From<CacheError> for KvError {
@@ -78,25 +56,20 @@ fn set_entry(buf: &mut [u8], i: usize, k: Key, v: Val) {
 fn find(buf: &[u8], k: Key) -> Option<usize> {
     (0..read_count(buf)).find(|&i| entry(buf, i).0 == k)
 }
-/// Stamp the trailing CRC over the payload. Called before releasing any write.
 fn seal(buf: &mut [u8]) {
     let c = crc32(&buf[0..CRC_AT]);
     buf[CRC_AT..].copy_from_slice(&c.to_le_bytes());
 }
-/// Whether a bucket page's CRC matches its payload.
 fn intact(buf: &[u8]) -> bool {
     crc32(&buf[0..CRC_AT]) == u32::from_le_bytes(buf[CRC_AT..].try_into().unwrap())
 }
 
-/// A hash-bucket KV over a fixed number of bucket pages.
 pub struct PagedKv {
     cache: PageCache,
     buckets: u32,
 }
 
 impl PagedKv {
-    /// Create a store of `buckets` empty buckets on `file` (initialized with that
-    /// many sealed, empty pages and synced), cached in `frames` frames.
     pub fn create(file: Arc<dyn BlockFile>, buckets: u32, frames: usize) -> Result<Self> {
         assert!(buckets > 0 && frames > 0);
         let mut page = vec![0u8; PAGE_SIZE];
@@ -113,7 +86,6 @@ impl PagedKv {
         })
     }
 
-    /// Re-open an existing store whose file already holds `buckets` bucket pages.
     pub fn open(file: Arc<dyn BlockFile>, buckets: u32, frames: usize) -> Self {
         Self {
             cache: PageCache::open(file, frames),
@@ -125,7 +97,6 @@ impl PagedKv {
         (k.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as u32 % self.buckets
     }
 
-    /// Look up `k`.
     pub fn get(&self, k: Key) -> Result<Option<Val>> {
         let bucket = self.bucket_of(k);
         let p = self.cache.fetch(bucket)?;
@@ -136,7 +107,6 @@ impl PagedKv {
         Ok(find(&b, k).map(|i| entry(&b, i).1))
     }
 
-    /// Insert or overwrite `k = v`.
     pub fn put(&self, k: Key, v: Val) -> Result<()> {
         let bucket = self.bucket_of(k);
         let p = self.cache.fetch(bucket)?;
@@ -159,8 +129,6 @@ impl PagedKv {
         Ok(())
     }
 
-    /// Atomic read-modify-write under the bucket's write latch, so concurrent
-    /// updates to `k` never lose one.
     pub fn update(&self, k: Key, default: Val, f: impl FnOnce(Val) -> Val) -> Result<()> {
         let bucket = self.bucket_of(k);
         let p = self.cache.fetch(bucket)?;
@@ -184,7 +152,6 @@ impl PagedKv {
         Ok(())
     }
 
-    /// Flush every dirty bucket and `sync` — the durability barrier.
     pub fn checkpoint(&self) -> Result<()> {
         self.cache
             .checkpoint()
@@ -195,7 +162,6 @@ impl PagedKv {
         self.buckets
     }
 
-    /// Sum of every value across every bucket — for conservation assertions.
     pub fn total(&self) -> Result<u128> {
         let mut sum = 0u128;
         for bkt in 0..self.buckets {
@@ -211,14 +177,12 @@ impl PagedKv {
         Ok(sum)
     }
 
-    /// Whether bucket `bkt`'s page passes its checksum (for crash inspection).
     pub fn bucket_intact(&self, bkt: u32) -> Result<bool> {
         let p = self.cache.fetch(bkt)?;
         let b = p.read();
         Ok(intact(&b))
     }
 
-    /// The `(key, value)` entries of bucket `bkt`, or `Corrupt` if it is torn.
     pub fn bucket_entries(&self, bkt: u32) -> Result<Vec<(Key, Val)>> {
         let p = self.cache.fetch(bkt)?;
         let b = p.read();

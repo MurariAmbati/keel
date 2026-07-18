@@ -1,13 +1,3 @@
-//! Regression for the stale-checksum bug an adversarial review surfaced: when an
-//! insert takes a page's write latch and `SlottedPage::insert` internally runs
-//! `compact()` but still returns `PageFull`, the page's header bytes changed yet
-//! the stored checksum was NOT recomputed — so a checkpoint persisted a page whose
-//! checksum is stale, and a checksum-verifying reader (crash recovery / dbcheck)
-//! would drop the *intact* committed records on it as "torn".
-//!
-//! On a `MemDisk` (which never tears), EVERY page must pass `verify_checksum()`
-//! after a checkpoint. Both tests below would fail before the fix.
-
 use keel_cbuffer::PageCache;
 use keel_cheap::Heap;
 use keel_page::{SlottedPage, MAX_TUPLE_SIZE};

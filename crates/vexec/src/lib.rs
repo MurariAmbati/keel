@@ -1,28 +1,10 @@
-//! A vectorized (columnar, batch-at-a-time) executor (§9).
-//!
-//! The row-at-a-time Volcano executor spends its life in per-tuple virtual
-//! dispatch; the vectorized executor amortizes each operation over a whole batch
-//! of ~1024 rows held columnwise. This crate is a *separate* implementation of the
-//! same semantics — deliberately, so the tuple-vs-vector comparison (§9's headline
-//! ablation) is between two engines that provably agree. The differential test at
-//! the bottom checks exactly that: vectorized filter/project must equal the
-//! reference engine's row-at-a-time result.
-//!
-//! Three-valued NULL logic is preserved. Each primitive (`eq_vec`, `and_vec`, …)
-//! loops over the batch once, which is where the speedup comes from; measuring it
-//! against the row engine on TPC-H-style scans is the write-up's headline table.
-
 use keel_sql::{BinOp, Expr, UnOp};
 use keel_types::Value;
 
-/// The default vector width (rows per batch).
 pub const BATCH: usize = 1024;
 
-/// A columnar batch: one `Vec<Value>` per column, all of length `len`. `cols` are
-/// addressed by the same order as `names`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Batch {
-    /// `(table_alias, column_name)` per column position.
     pub names: Vec<(String, String)>,
     pub cols: Vec<Vec<Value>>,
     pub len: usize,
@@ -44,7 +26,6 @@ impl Batch {
         }
     }
 
-    /// Materialize back to row form (for comparison / results).
     pub fn to_rows(&self) -> Vec<Vec<Value>> {
         (0..self.len)
             .map(|r| self.cols.iter().map(|c| c[r].clone()).collect())
@@ -63,9 +44,6 @@ fn col_index(names: &[(String, String)], name: &str) -> Option<usize> {
     names.iter().position(|(_, c)| c == name)
 }
 
-/// Evaluate an expression over the whole batch, producing a result vector of
-/// length `batch.len`. Each node processes the batch columnwise (the vectorized
-/// primitive), preserving three-valued NULL logic.
 pub fn eval_vec(e: &Expr, batch: &Batch) -> R<Vec<Value>> {
     match e {
         Expr::Literal(v) => Ok(vec![v.clone(); batch.len]),
@@ -112,8 +90,6 @@ pub fn eval_vec(e: &Expr, batch: &Batch) -> R<Vec<Value>> {
     }
 }
 
-/// Vectorized filter: keep rows where the predicate is TRUE (a selection over the
-/// batch).
 pub fn filter(pred: &Expr, batch: &Batch) -> R<Batch> {
     let mask = eval_vec(pred, batch)?;
     let sel: Vec<usize> = (0..batch.len)
@@ -122,7 +98,6 @@ pub fn filter(pred: &Expr, batch: &Batch) -> R<Batch> {
     Ok(select(batch, &sel))
 }
 
-/// Vectorized projection: evaluate each output expression over the batch.
 pub fn project(exprs: &[Expr], out_names: &[(String, String)], batch: &Batch) -> R<Batch> {
     let cols: Vec<Vec<Value>> = exprs.iter().map(|e| eval_vec(e, batch)).collect::<R<_>>()?;
     Ok(Batch {

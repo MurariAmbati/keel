@@ -1,25 +1,7 @@
-//! Schema-aware random generation and metamorphic oracles (§7.2).
-//!
-//! The generator builds type-correct predicates by construction; the tests apply
-//! **Ternary Logic Partitioning** (Rigger & Su, OOPSLA'20): for any predicate
-//! `p`, every row falls into exactly one of `p` (TRUE), `NOT p` (FALSE), or
-//! `p IS NULL` (UNKNOWN), so
-//!
-//! ```text
-//! SELECT * FROM t  ==  (SELECT * FROM t WHERE p)
-//!               UNION ALL (SELECT * FROM t WHERE NOT p)
-//!               UNION ALL (SELECT * FROM t WHERE p IS NULL)
-//! ```
-//!
-//! as multisets. A bug in the three-valued logic (NULL comparisons, `NOT`, `AND`,
-//! `OR`, `IN`) breaks the identity — TLP is the standing adversary the design
-//! points at the NULL-semantics bug farm.
-
 use keel_types::{ColumnType, Value};
 
 use crate::ast::*;
 
-/// A tiny deterministic RNG local to this module (so `keel-sql` needs no dep).
 pub struct Gen {
     s: u64,
 }
@@ -51,8 +33,6 @@ impl Gen {
     }
 }
 
-/// A random value of a column type, `NULL` with probability ~1/6 unless
-/// `allow_null` is false. Small ranges/alphabets to force collisions and edges.
 pub fn random_value(g: &mut Gen, ty: ColumnType, allow_null: bool) -> Value {
     if allow_null && g.chance(1, 6) {
         return Value::Null;
@@ -71,12 +51,10 @@ pub fn random_value(g: &mut Gen, ty: ColumnType, allow_null: bool) -> Value {
     }
 }
 
-/// A literal expression for a value.
 fn lit(v: Value) -> Expr {
     Expr::Literal(v)
 }
 
-/// A random, type-correct boolean predicate over `cols` (name, type).
 pub fn random_predicate(g: &mut Gen, cols: &[(String, ColumnType)], depth: u32) -> Expr {
     if depth == 0 || g.chance(1, 2) {
         atom(g, cols)

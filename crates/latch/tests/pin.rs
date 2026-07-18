@@ -1,12 +1,3 @@
-//! Race oracle for the pin/evict handshake (D-LATCH-1 `Frame`).
-//!
-//! The property under test is the one the buffer's `choose_victim` cannot
-//! guarantee today: a frame is **never evicted while pinned**, and **never
-//! pinned after eviction begins**. Because the pin count and the `evicted`
-//! tombstone live under one mutex, the two decisions are atomic; if they were
-//! ever split across separate locks a victim could be chosen the instant another
-//! thread pinned it, and this test would see a pinned-yet-evicted frame.
-
 use keel_latch::Frame;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
