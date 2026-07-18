@@ -708,8 +708,32 @@ So D-PAGER-6's "convert `Cell`/`RefCell` to `Mutex`/atomics" is not merely under
 for `BTree::root` it is **the wrong primitive**. A root split is a multi-page structural
 modification and needs mutual exclusion over the operation, not an atomic over the pointer.
 
-**Status.** Deadlock: enumerated and closed. Atomicity: enumerated, three sites, none fixed
-— fixing them is a design question (lock granularity), not a type swap, and is deliberately
+**Measured, and the attribution above is partly wrong.** The paragraph on `BTree::insert`
+was written by reading code, which is the weakest standard in this project. Branch
+`prove/btree-root-race` performs the conversion D-PAGER-6 recommends so the scenario is
+constructible at all (with `Cell` the tree is `!Sync` and the compiler refuses to share
+it), and measures it:
+
+| run | 4 threads x 1500 inserts, all `Ok` | rows unreachable from the root |
+|---|---|---|
+| 1 | 6000 | 2763 |
+| 2 | 6000 | 2358 |
+| 3 | 6000 | 3219 |
+| control, `THREADS = 1` | 6000 | **0** |
+
+The control matters: single-threaded the atomic conversion is perfectly correct, so the
+loss is a race and not a botched port. Every insert returned success, so the loss is
+silent.
+
+What that corrects: this entry pinned the hazard on the root read-modify-write
+specifically. **A ~40-54% loss rate cannot be explained by root splits alone** — the
+recursive descent and the node writes are equally unsynchronised, and concurrent splits of
+any node corrupt each other the same way. The conclusion stands (the hazard is real,
+atomics are the wrong primitive) but the mechanism was drawn too narrowly. `BTree::insert`
+needs mutual exclusion over the whole operation, not a fix aimed at the root pointer.
+
+**Status.** Deadlock: enumerated and closed. Atomicity: measured, catastrophic, unfixed —
+fixing it is a design question (lock granularity), not a type swap, and is deliberately
 left open rather than guessed at. Workspace **212**, both profiles, clippy-clean.
 
 ## D-PAGER-8 — Localising the D-PAGER-7 hang: one re-entrant borrow, found and removed
