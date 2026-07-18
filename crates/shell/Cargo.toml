@@ -1,0 +1,20 @@
+[package]
+name = "keel-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "keel"
+path = "src/main.rs"
+
+[dependencies]
+keel-vfs = { path = "../vfs" }
+keel-buffer = { path = "../buffer" }
+keel-heap = { path = "../heap" }
+keel-types = { path = "../types" }
+keel-dbcheck = { path = "../dbcheck" }
+keel-db = { path = "../db" }
+
+[lints]
+workspace = true

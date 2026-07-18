@@ -1,0 +1,20 @@
+[package]
+name = "keel-stats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "keel_stats"
+path = "src/lib.rs"
+
+[dependencies]
+keel-types = { path = "../types" }
+keel-sql = { path = "../sql" }
+keel-keys = { path = "../keys" }
+
+[dev-dependencies]
+keel-rng = { path = "../rng" }
+
+[lints]
+workspace = true

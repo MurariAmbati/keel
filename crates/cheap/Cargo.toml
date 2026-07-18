@@ -1,0 +1,18 @@
+[package]
+name = "keel-cheap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+keel-cbuffer = { path = "../cbuffer" }
+keel-vfs = { path = "../vfs" }
+keel-page = { path = "../page" }
+
+[dev-dependencies]
+keel-faultfs = { path = "../faultfs" }
+keel-rng = { path = "../rng" }

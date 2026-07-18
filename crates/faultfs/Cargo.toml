@@ -1,0 +1,16 @@
+[package]
+name = "keel-faultfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "keel_faultfs"
+path = "src/lib.rs"
+
+[dependencies]
+keel-vfs = { path = "../vfs" }
+keel-rng = { path = "../rng" }
+
+[lints]
+workspace = true

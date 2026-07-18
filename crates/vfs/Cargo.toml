@@ -1,0 +1,12 @@
+[package]
+name = "keel-vfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "keel_vfs"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

@@ -1,0 +1,23 @@
+[package]
+name = "keel-wal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "keel_wal"
+path = "src/lib.rs"
+
+[dependencies]
+keel-vfs = { path = "../vfs" }
+keel-page = { path = "../page" }
+keel-buffer = { path = "../buffer" }
+keel-pager = { path = "../pager" }
+
+[dev-dependencies]
+keel-cbuffer = { path = "../cbuffer" }
+keel-faultfs = { path = "../faultfs" }
+keel-rng = { path = "../rng" }
+
+[lints]
+workspace = true

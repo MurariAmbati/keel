@@ -1,0 +1,26 @@
+[package]
+name = "keel-dbcheck"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "keel_dbcheck"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dbcheck"
+path = "src/main.rs"
+
+[dependencies]
+keel-vfs = { path = "../vfs" }
+keel-page = { path = "../page" }
+keel-heap = { path = "../heap" }
+
+[dev-dependencies]
+keel-buffer = { path = "../buffer" }
+keel-faultfs = { path = "../faultfs" }
+keel-rng = { path = "../rng" }
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "keel-vexec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "keel_vexec"
+path = "src/lib.rs"
+
+[dependencies]
+keel-types = { path = "../types" }
+keel-sql = { path = "../sql" }
+
+[dev-dependencies]
+keel-rng = { path = "../rng" }
+
+[lints]
+workspace = true

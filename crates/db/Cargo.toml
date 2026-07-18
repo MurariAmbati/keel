@@ -1,0 +1,31 @@
+[package]
+name = "keel-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "keel_db"
+path = "src/lib.rs"
+
+[dependencies]
+keel-sql = { path = "../sql" }
+keel-types = { path = "../types" }
+keel-page = { path = "../page" }
+keel-heap = { path = "../heap" }
+keel-btree = { path = "../btree" }
+keel-keys = { path = "../keys" }
+keel-stats = { path = "../stats" }
+keel-buffer = { path = "../buffer" }
+keel-pager = { path = "../pager" }
+keel-vfs = { path = "../vfs" }
+
+[dev-dependencies]
+keel-cbuffer = { path = "../cbuffer" }
+keel-rng = { path = "../rng" }
+keel-faultfs = { path = "../faultfs" }
+keel-dbcheck = { path = "../dbcheck" }
+keel-types = { path = "../types" }
+
+[lints]
+workspace = true

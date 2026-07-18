@@ -1,0 +1,18 @@
+[package]
+name = "keel-keys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "keel_keys"
+path = "src/lib.rs"
+
+[dependencies]
+keel-types = { path = "../types" }
+
+[dev-dependencies]
+keel-rng = { path = "../rng" }
+
+[lints]
+workspace = true

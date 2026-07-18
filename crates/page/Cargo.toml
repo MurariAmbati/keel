@@ -1,0 +1,18 @@
+[package]
+name = "keel-page"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "keel_page"
+path = "src/lib.rs"
+
+[dev-dependencies]
+keel-rng = { path = "../rng" }
+
+# `page` is the sole crate permitted `unsafe` (D11) — the quarantine for any
+# future zero-copy frame reinterpretation. The P1 implementation is entirely
+# safe (bounds-checked byte accessors); the allowance reserves the boundary.
+[lints.rust]
+unsafe_code = "allow"

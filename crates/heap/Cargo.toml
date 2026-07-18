@@ -1,0 +1,23 @@
+[package]
+name = "keel-heap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "keel_heap"
+path = "src/lib.rs"
+
+[dependencies]
+keel-buffer = { path = "../buffer" }
+keel-pager = { path = "../pager" }
+keel-page = { path = "../page" }
+
+[dev-dependencies]
+keel-vfs = { path = "../vfs" }
+keel-faultfs = { path = "../faultfs" }
+keel-cbuffer = { path = "../cbuffer" }
+keel-rng = { path = "../rng" }
+
+[lints]
+workspace = true

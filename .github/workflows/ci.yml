@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check:
+    # The vfs crate has both #[cfg(unix)] and #[cfg(windows)] positioned-I/O
+    # paths, so the workspace builds and tests on either.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets
+      - name: build
+        run: cargo build --workspace
+      - name: test
+        run: cargo test --workspace
+      - name: crash campaign (campaign profile)
+        run: cargo test --workspace --profile campaign

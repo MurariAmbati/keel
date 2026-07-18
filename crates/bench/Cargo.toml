@@ -1,0 +1,28 @@
+[package]
+name = "keel-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "keel-bench"
+path = "src/main.rs"
+
+[[bin]]
+name = "keel-qbench"
+path = "src/qbench.rs"
+
+[[bin]]
+name = "keel-tpch"
+path = "src/tpch.rs"
+
+[dependencies]
+keel-sql = { path = "../sql" }
+keel-vexec = { path = "../vexec" }
+keel-types = { path = "../types" }
+keel-rng = { path = "../rng" }
+keel-db = { path = "../db" }
+keel-vfs = { path = "../vfs" }
+
+[lints]
+workspace = true

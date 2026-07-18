@@ -1,0 +1,25 @@
+[package]
+name = "keel-btree"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "keel_btree"
+path = "src/lib.rs"
+
+[dependencies]
+keel-buffer = { path = "../buffer" }
+keel-pager = { path = "../pager" }
+keel-page = { path = "../page" }
+keel-heap = { path = "../heap" }
+
+[dev-dependencies]
+keel-vfs = { path = "../vfs" }
+keel-cbuffer = { path = "../cbuffer" }
+keel-keys = { path = "../keys" }
+keel-types = { path = "../types" }
+keel-rng = { path = "../rng" }
+
+[lints]
+workspace = true

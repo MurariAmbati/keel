@@ -1,0 +1,17 @@
+[package]
+name = "keel-pageview"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pageview"
+path = "src/main.rs"
+
+[dependencies]
+keel-vfs = { path = "../vfs" }
+keel-page = { path = "../page" }
+keel-heap = { path = "../heap" }
+
+[lints]
+workspace = true

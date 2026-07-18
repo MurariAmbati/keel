@@ -1,0 +1,62 @@
+# KEEL — a relational database engine, from empty file to a credible TPC-H fight.
+#
+# Workspace of small crates (design §11). The crate boundary is load-bearing:
+# `page` is the sole home of `unsafe` (D11); `vfs` is the sole I/O path so the
+# fault injector can substitute for the real disk (D11); nothing reaches the
+# platform except through those two.
+[workspace]
+resolver = "2"
+members = [
+    "crates/rng",
+    "crates/vfs",
+    "crates/faultfs",
+    "crates/page",
+    "crates/types",
+    "crates/keys",
+    "crates/buffer",
+    "crates/heap",
+    "crates/btree",
+    "crates/wal",
+    "crates/mvcc",
+    "crates/lockmgr",
+    "crates/latch",
+    "crates/cbuffer",
+    "crates/ckv",
+    "crates/cheap",
+    "crates/pager",
+    "crates/sql",
+    "crates/stats",
+    "crates/vexec",
+    "crates/db",
+    "crates/dbcheck",
+    "crates/pageview",
+    "crates/bench",
+    "crates/shell",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/MurariAmbati/keel"
+
+[workspace.lints.rust]
+unsafe_code = "warn" # `page` overrides this to `allow`; everywhere else unsafe is a warning we treat as a wall.
+
+# One optimized profile for the campaigns; dev stays cheap for the edit loop.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+
+# A dedicated profile the crash/fuzz campaigns run under: optimized, but with
+# debug assertions and overflow checks kept ON so invariants trip in-campaign.
+[profile.campaign]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true
+panic = "unwind" # the fault injector simulates crashes in-process; it must not abort the harness.
