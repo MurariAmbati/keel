@@ -211,7 +211,7 @@ fn split_at_bytes(sizes: impl Iterator<Item = usize>, n: usize) -> usize {
 /// keeps many indexes in one file alongside the heap.
 pub struct BTree<'a, P: Pager = BufferPool> {
     bp: &'a P,
-    root: std::cell::Cell<PageId>,
+    root: std::sync::atomic::AtomicU32,
     meta: Option<PageId>,
 }
 
@@ -227,7 +227,7 @@ impl<'a, P: Pager> BTree<'a, P> {
         let root = alloc(bp, PageType::BTreeLeaf)?;
         let tree = BTree {
             bp,
-            root: std::cell::Cell::new(root),
+            root: std::sync::atomic::AtomicU32::new(root),
             meta: Some(meta),
         };
         tree.store_leaf(
@@ -247,7 +247,7 @@ impl<'a, P: Pager> BTree<'a, P> {
         let root = bp.with_page(0, |b| raw::extra(b) as u32)?;
         Ok(BTree {
             bp,
-            root: std::cell::Cell::new(root),
+            root: std::sync::atomic::AtomicU32::new(root),
             meta: Some(0),
         })
     }
@@ -258,7 +258,7 @@ impl<'a, P: Pager> BTree<'a, P> {
         let root = alloc(bp, PageType::BTreeLeaf)?;
         let tree = BTree {
             bp,
-            root: std::cell::Cell::new(root),
+            root: std::sync::atomic::AtomicU32::new(root),
             meta: None,
         };
         tree.store_leaf(
@@ -276,13 +276,13 @@ impl<'a, P: Pager> BTree<'a, P> {
     pub fn open_rooted(bp: &'a P, root: PageId) -> Self {
         BTree {
             bp,
-            root: std::cell::Cell::new(root),
+            root: std::sync::atomic::AtomicU32::new(root),
             meta: None,
         }
     }
 
     pub fn root(&self) -> PageId {
-        self.root.get()
+        self.root.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn write_meta_root(&self, root: PageId) -> Result<()> {
@@ -338,7 +338,7 @@ impl<'a, P: Pager> BTree<'a, P> {
 
     /// Look up a key.
     pub fn get(&self, key: &[u8]) -> Result<Option<Rid>> {
-        let mut pid = self.root.get();
+        let mut pid = self.root.load(std::sync::atomic::Ordering::SeqCst);
         loop {
             match self.load(pid)? {
                 Node::Leaf(leaf) => {
@@ -356,8 +356,8 @@ impl<'a, P: Pager> BTree<'a, P> {
     /// Insert or replace `key -> rid`. Splits propagate up; the root grows when
     /// it splits.
     pub fn insert(&self, key: &[u8], rid: Rid) -> Result<()> {
-        if let Some((sep, right_pid)) = self.insert_rec(self.root.get(), key, rid)? {
-            let old_root = self.root.get();
+        if let Some((sep, right_pid)) = self.insert_rec(self.root.load(std::sync::atomic::Ordering::SeqCst), key, rid)? {
+            let old_root = self.root.load(std::sync::atomic::Ordering::SeqCst);
             let new_root = alloc(self.bp, PageType::BTreeInternal)?;
             self.store_internal(
                 new_root,
@@ -366,7 +366,7 @@ impl<'a, P: Pager> BTree<'a, P> {
                     children: vec![old_root, right_pid],
                 },
             )?;
-            self.root.set(new_root);
+            self.root.store(new_root, std::sync::atomic::Ordering::SeqCst);
             self.write_meta_root(new_root)?;
         }
         Ok(())
@@ -453,7 +453,7 @@ impl<'a, P: Pager> BTree<'a, P> {
 
     /// Delete a key (lazy: tolerate underflow). Returns whether it existed.
     pub fn delete(&self, key: &[u8]) -> Result<bool> {
-        let mut pid = self.root.get();
+        let mut pid = self.root.load(std::sync::atomic::Ordering::SeqCst);
         loop {
             match self.load(pid)? {
                 Node::Internal(node) => pid = node.children[node.child_index(key)],
@@ -475,7 +475,7 @@ impl<'a, P: Pager> BTree<'a, P> {
     }
 
     fn find_leaf(&self, key: &[u8]) -> Result<PageId> {
-        let mut pid = self.root.get();
+        let mut pid = self.root.load(std::sync::atomic::Ordering::SeqCst);
         loop {
             match self.load(pid)? {
                 Node::Leaf(_) => return Ok(pid),
@@ -485,7 +485,7 @@ impl<'a, P: Pager> BTree<'a, P> {
     }
 
     fn leftmost_leaf(&self) -> Result<PageId> {
-        let mut pid = self.root.get();
+        let mut pid = self.root.load(std::sync::atomic::Ordering::SeqCst);
         loop {
             match self.load(pid)? {
                 Node::Leaf(_) => return Ok(pid),
@@ -535,7 +535,7 @@ impl<'a, P: Pager> BTree<'a, P> {
         let mut leaf_depths = Vec::new();
         let mut dfs_leaves = Vec::new();
         self.check_node(
-            self.root.get(),
+            self.root.load(std::sync::atomic::Ordering::SeqCst),
             None,
             None,
             0,
