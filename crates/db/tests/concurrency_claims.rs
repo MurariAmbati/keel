@@ -65,8 +65,16 @@ assert_not_sync!(
     Database,
     Database<PageCache>,
     keel_heap::HeapFile<'static, PageCache>,
-    keel_btree::BTree<'static, PageCache>,
 );
+
+/// On this branch `BTree` IS `Sync` — the atomic root plus the whole-tree `RwLock` made it so,
+/// which is the entire point of the branch. `main` asserts the opposite, and that disagreement
+/// is deliberate: it is how the boundary stays honest on both sides rather than drifting on one.
+#[test]
+fn the_btree_is_sync_on_this_branch_only() {
+    assert_send::<keel_btree::BTree<'static, PageCache>>();
+    assert_sync::<keel_btree::BTree<'static, PageCache>>();
+}
 
 /// Why the three types above are `!Sync`, and what it would actually take to change
 /// that — corrected by D-PAGER-8/9, which superseded the original advice here.
