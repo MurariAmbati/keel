@@ -407,8 +407,8 @@ impl<'a, P: Pager> BTree<'a, P> {
                     next: old_next,
                 };
                 leaf.next = right_pid;
-                self.store_leaf(pid, &leaf)?;
                 self.store_leaf(right_pid, &right)?;
+                self.store_leaf(pid, &leaf)?;
                 if old_next != NIL {
                     let mut nn = self.load_leaf(old_next)?;
                     nn.prev = right_pid;

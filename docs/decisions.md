@@ -668,6 +668,58 @@ time), so this buys thread-*safety* (coarse-locked sharing), not yet
 thread-*concurrency*; wiring the lock manager + MVCC for fine-grained latching is the
 next phase, now unblocked because the types cross thread boundaries.
 
+## D-PAGER-10 — Fine-grained latching is blocked by the `Pager` seam, not by the B-tree
+A design panel developed three protocols against this codebase (latch-coupling with an optimistic
+descent; top-down preemptive split; B-link). Latch-coupling scored highest — and then the judging
+lens that attacked it hardest landed the finding that matters more than the winner: **through the
+current `Pager` trait, every one of them degenerates into the whole-tree lock they were meant to
+replace.** Two facts, each verifiable from five lines, decide it.
+
+**1. The seam cannot express early ancestor release.**
+
+```rust
+fn with_page<R>(&self, pid: PageId, f: impl FnOnce(&[u8]) -> R) -> Result<R, PagerError> {
+    let p = self.fetch(pid)?;
+    let b = p.read();   // the guard is a LOCAL of with_page
+    Ok(f(&b))           // f receives &[u8] — never a handle to `b`
+}
+```
+
+Coupling *is* expressible: nesting `with_page(parent, |_| with_page(child, ...))` compiles and
+runs, so a descent can hold parent and child at once. Releasing the parent is not, because the
+closure has no handle to the guard that would have to be dropped. So every ancestor's latch stays
+held until the outermost closure returns, and **every operation holds the root latch for its whole
+descent**. Bayer–Schkolnick's entire point is releasing safe ancestors on the way down; that
+optimisation is not merely unimplemented here, it is inexpressible.
+
+**2. Every node mutation is already an unlatched read-modify-write.** `load` parses a page into an
+owned `Node` and drops the latch when `with_page` returns; `store_leaf`/`store_internal` then
+re-acquire it. So `load → modify → store` is unprotected at *every level of every operation*.
+
+This supersedes both earlier attributions. D-PAGER-9 first blamed the root read-modify-write, then
+corrected itself to "the descent and node writes are equally unsynchronised". The real mechanism is
+sharper than either: the tree has no in-place node mutation at all. That is why 4 threads lose
+~46% of rows rather than a handful, and it means **wrapping latches around the current `load`/`store`
+pair would change nothing** — the window is between the two calls.
+
+**Consequences for sequencing.** "Implement latch-coupling" was the wrong next step, and is
+withdrawn. The order has to be:
+
+1. **Fuse** parse-decide-write into a single `with_page_mut` per mutated node. Protocol-independent,
+   required by all three designs, and the bulk of the work.
+2. **Change the seam** so a descent can hand a guard back or release an ancestor — otherwise the
+   root is held by every writer and no protocol can beat the whole-tree lock.
+3. *Then* choose a protocol.
+
+**What the panel also found, and what was fixed.** The split published `leaf.next = right_pid`
+before writing `right_pid`. A zeroed page decodes `extra == 0` as `prev = 0, next = 0` — page 0, the
+Meta page, not `NIL` — so the window exposed a leaf chain running into the Meta page. Reordered to
+fill-then-publish, which is free. Scoped honestly: `store_leaf` writes to the *cached* page, so
+this governs concurrent-reader visibility and **not** crash atomicity, which needs the WAL.
+
+**Cost of the finding.** 10 agents, ~893k tokens. Worth recording that the winning design is not
+what the exercise produced — the disqualifying constraint on all three is.
+
 ## D-PAGER-9 — The rest of the conversion surface, and why "`Cell`→atomics" is wrong for `BTree::root`
 D-PAGER-8 left an explicit gap: the detector instruments only `Database`, while D-PAGER-6
 also names `HeapFile`'s `fsm`/`cursor`/`stats` and `BTree`'s `root`. Enumerating that
